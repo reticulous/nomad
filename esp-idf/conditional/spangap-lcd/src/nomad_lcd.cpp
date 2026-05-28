@@ -29,7 +29,7 @@
  */
 #include "sdkconfig.h"
 
-#if CONFIG_DIPTYCH_LCD
+#if CONFIG_SPANGAP_LCD
 
 #include "lcd.h"
 #include "storage.h"
@@ -686,4 +686,4 @@ extern "C" void nomadLcdRegister(void) {
     lcdRegisterSettings("Reticulum/Nomad", "Nomad", nomadSettingsPane);
 }
 
-#endif /* CONFIG_DIPTYCH_LCD */
+#endif /* CONFIG_SPANGAP_LCD */

@@ -88,10 +88,10 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import FloatingWindow from 'diptych-browser/components/FloatingWindow.vue'
+import FloatingWindow from 'spangap-browser/components/FloatingWindow.vue'
 import { useNomad, DEFAULT_PAGE } from '../modules/nomad'
 import { micronToHtml } from '../lib/micron'
-import { useWinZoom } from '../lib/winZoom'
+import { useWinZoom } from 'reticulous-core/lib/winZoom'
 
 const { scale, zoomIn, zoomOut } = useWinZoom('nomad')
 

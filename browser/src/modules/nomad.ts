@@ -12,8 +12,8 @@
  *   cmd: nomad.cmd.go=<hash>[:<path>] / .reload / .bookmark.add / .bookmark.del
  */
 import { ref, computed, type ComputedRef } from 'vue'
-import { useDeviceStore } from 'diptych-browser/stores/device'
-import { useMenuStore } from 'diptych-browser/stores/menu'
+import { useDeviceStore } from 'spangap-browser/stores/device'
+import { useMenuStore } from 'spangap-browser/stores/menu'
 import NomadPanel from '../panels/NomadPanel.vue'
 
 /* Visibility ref for the Status → Nomad Browser floating window. */

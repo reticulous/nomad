@@ -1,0 +1,9 @@
+description: "reticulous-nomad: Nomad Network page-client on spangap. Sits on rnsd's byte-array API; renders Micron pages in the browser SPA and on-device LVGL."
+url: https://github.com/reticulous/reticulous-nomad
+version: "0.1.0"
+license: "Apache-2.0"
+targets:
+  - esp32s3
+dependencies:
+  idf:
+    version: ">=5.5"

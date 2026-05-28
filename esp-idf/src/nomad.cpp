@@ -16,7 +16,7 @@
  *   bookmarks      : s.nomad.bookmarks.<hex> = <name>|<note> (persistent).
  */
 #include "nomad.h"
-#include "diptych.h"
+#include "spangap.h"
 #include "ports.h"
 #include "rnsd.h"     /* rnsdLinkOpen / rnsdLinkRequest / rnsdLinkTeardown / release */
 

@@ -1,0 +1,20 @@
+# reticulous-nomad — Nomad Network page-client on spangap.
+#
+# The "text web" half of Nomad Network: nodes host pages (Micron markup)
+# and files on a `nomadnetwork.node` destination; this straddle is the
+# client/browser side. Sits on rnsd's byte-array API directly — not on
+# LXMF — using rnsdLinkOpen + rnsdLinkRequest. Storage is the API
+# (nomad.nav.*, nomad.page.*, nomad.nodes.*, s.nomad.bookmarks.*).
+#
+# Browser half: settings + the NomadBrowser window (Micron→DOM renderer).
+# LCD slice: the on-device Nomad browser program (C++ Micron→LVGL).
+schema_version: 1
+name: reticulous/reticulous-nomad
+prefix: nomad
+version: 0.1.0
+firmware: esp-idf
+# LCD slice (esp-idf/lcd/) — see reticulous-lxmf for notes on activator gating.
+browser: browser
+platforms: [idf]
+requires:
+  - reticulous/reticulous-core
