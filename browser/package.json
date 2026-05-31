@@ -1,5 +1,5 @@
 {
-  "name": "reticulous-nomad",
+  "name": "nomad",
   "version": "0.1.0",
   "type": "module",
   "description": "Browser-side Nomad Network page-client UI: settings panel, NomadWindow (Micron→DOM renderer).",
@@ -14,6 +14,6 @@
     "quasar": "^2.17.0",
     "pinia": "^3.0.4",
     "spangap-browser": "*",
-    "reticulous-core": "*"
+    "rns": "*"
   }
 }

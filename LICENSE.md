@@ -1,6 +1,6 @@
 # License
 
-This repository, **reticulous-nomad** (Nomad Network page-client on spangap;
+This repository, **nomad** (Nomad Network page-client on spangap;
 renders Micron pages in the browser SPA and on-device LVGL), is released
 under the **Apache License, Version 2.0**.
 

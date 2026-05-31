@@ -1,6 +1,6 @@
 set(NOMAD_SRCS
     "src/nomad.cpp"
-    # LCD slice — see reticulous-lxmf/CMakeLists.txt for the same pattern.
+    # LCD slice — see lxmf/CMakeLists.txt for the same pattern.
     "lcd/src/nomad_lcd.cpp"
 )
 

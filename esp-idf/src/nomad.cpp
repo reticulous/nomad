@@ -623,7 +623,7 @@ static void nodeListLeaf(const char* key, const char* val)
     e.last_s = std::atoi(val);
     e.hops   = std::atoi(p1 + 1);
     e.name   = p2 + 1;
-    cliPrintf("  %s  %2d hops  %3ds  %s\n", tail, e.hops,
+    cliPrintf("%s  %2d hops  %3ds  %s\n", tail, e.hops,
               nowUnixS() - e.last_s, sanitizeForLog(e.name).c_str());
     s_node_rows++;
 }
@@ -636,28 +636,30 @@ static void bookmarkListLeaf(const char* key, const char* val)
     size_t bar = name.find('|');
     std::string note = (bar == std::string::npos) ? "" : name.substr(bar + 1);
     if (bar != std::string::npos) name = name.substr(0, bar);
-    cliPrintf("  %s  %s%s%s\n", tail, sanitizeForLog(name).c_str(),
+    cliPrintf("%s  %s%s%s\n", tail, sanitizeForLog(name).c_str(),
               note.empty() ? "" : "  — ", sanitizeForLog(note).c_str());
 }
 
 static void cliNomad(const char* args)
 {
-    if (!args || !*args || strcmp(args, "help") == 0) {
-        cliPrintf("usage: nomad nodes                     — heard nodes (announce drift)\n");
-        cliPrintf("       nomad go <hash>[:<path>]        — fetch a page (default %s)\n",
-                  NOMAD_DEFAULT_PAGE);
-        cliPrintf("       nomad reload                    — re-fetch current (bypass cache)\n");
-        cliPrintf("       nomad bookmarks                 — list bookmarks\n");
-        cliPrintf("       nomad bookmark add <hash> <name>[ <note>]\n");
-        cliPrintf("       nomad bookmark del <hash>\n");
-        cliPrintf("  page bytes are logged on fetch; nav state in nomad.nav.*\n");
+    if (args && strcmp(args, "help") == 0) { cliPrintf("%-*s NomadNet browser: nodes, go, bookmarks\n", CLI_HELP_COL, "nomad [...]"); return; }
+    if (args && cliWantsHelp(args)) {
+        cliPrintf("nomad nodes                     heard nodes (announce drift)\n");
+        cliPrintf("nomad go <hash>[:<path>]        fetch a page (default %s)\n", NOMAD_DEFAULT_PAGE);
+        cliPrintf("nomad reload                    re-fetch current (bypass cache)\n");
+        cliPrintf("nomad bookmarks                 list bookmarks\n");
+        cliPrintf("nomad bookmark add <hash> <name>[ <note>]\n");
+        cliPrintf("nomad bookmark del <hash>\n");
+        cliPrintf("page bytes are logged on fetch; nav state in nomad.nav.*\n");
         return;
     }
+    /* Bare `nomad` → heard-nodes list as status. */
+    if (!args || !*args) args = "nodes";
 
     if (strcmp(args, "nodes") == 0) {
         s_node_rows = 0;
         storageForEach("nomad.nodes.", nodeListLeaf);
-        if (s_node_rows == 0) cliPrintf("  (no nodes heard yet)\n");
+        if (s_node_rows == 0) cliPrintf("(no nodes heard yet)\n");
         return;
     }
     if (strcmp(args, "bookmarks") == 0) {
@@ -705,7 +707,7 @@ static void cliNomad(const char* args)
         cliPrintf("usage: nomad bookmark add|del …\n");
         return;
     }
-    cliPrintf("usage: nomad [nodes|go|reload|bookmarks|bookmark …]\n");
+    cliPrintf("unknown subcommand. try `nomad -h`\n");
 }
 
 /* ─────────────── task ─────────────── */

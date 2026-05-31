@@ -1,4 +1,4 @@
-# reticulous-nomad — internals
+# nomad — internals
 
 ## Task
 

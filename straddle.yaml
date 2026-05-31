@@ -1,4 +1,4 @@
-# reticulous-nomad — Nomad Network page-client on spangap.
+# nomad — Nomad Network page-client on spangap.
 #
 # The "text web" half of Nomad Network: nodes host pages (Micron markup)
 # and files on a `nomadnetwork.node` destination; this straddle is the
@@ -9,15 +9,15 @@
 # Browser half: settings + the NomadBrowser window (Micron→DOM renderer).
 # LCD slice: the on-device Nomad browser program (C++ Micron→LVGL).
 schema_version: 1
-name: reticulous/reticulous-nomad
+name: reticulous/nomad
 prefix: nomad
 version: 0.1.0
 firmware: esp-idf
-# LCD slice (esp-idf/lcd/) — see reticulous-lxmf for notes on activator gating.
+# LCD slice (esp-idf/lcd/) — see lxmf for notes on activator gating.
 browser: browser
 platforms: [idf]
 requires:
-  - reticulous/reticulous-core
+  - reticulous/rns
 optional_requires:
   # On-device Nomad browser — lcd/src/nomad_lcd.cpp wrapped in #if CONFIG_SPANGAP_LCD.
   - spangap/spangap-lcd

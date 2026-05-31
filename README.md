@@ -1,10 +1,10 @@
-# reticulous-nomad
+# nomad
 
 ## What is this?
 
-**reticulous-nomad** is the [Nomad
+**nomad** is the [Nomad
 Network](https://github.com/markqvist/NomadNet) **page client** on
-[reticulous-core](../reticulous-core) — the "text web" half of Nomad
+[rns](../rns) — the "text web" half of Nomad
 Network: nodes host pages (in Micron markup) and files on a
 `nomadnetwork.node` destination, and this straddle is the
 client/browser side. It sits on rnsd's byte-array API directly (not on
@@ -14,7 +14,7 @@ storage as the API.
 ## What this straddle owns
 
 ```
-reticulous-nomad/
+nomad/
 ├── esp-idf/
 │   ├── include/nomad.h
 │   ├── src/nomad.cpp         the nomad page-client task
@@ -52,7 +52,7 @@ viewing endpoint (browser panel or LCD slice) renders.
 
 ## Dependencies
 
-- [reticulous-core](../reticulous-core)
+- [rns](../rns)
 
 ## What it does NOT do
 
@@ -65,5 +65,5 @@ viewing endpoint (browser panel or LCD slice) renders.
 - [INTERNALS.md](INTERNALS.md) — storage key shape, link / request
   flow, the announce fan-out subscription.
 - Deep-dive in the consuming app:
-  [docs/nomad.md](../reticulous-tdeck/docs/nomad.md) /
-  [docs/plans/nomad.md](../reticulous-tdeck/docs/plans/nomad.md).
+  [docs/nomad.md](../hw-tdeck/docs/nomad.md) /
+  [docs/plans/nomad.md](../hw-tdeck/docs/plans/nomad.md).
