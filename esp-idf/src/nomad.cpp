@@ -776,4 +776,10 @@ void nomadInit(void)
 
     /* Core 1, prio 1, 8 KB PSRAM stack — same class as lxmf. */
     spawnTask(nomadTaskMain, TAG, 8192, nullptr, 1, 1, STACK_PSRAM);
+
+    /* Self-register the on-device Nomad-browser launcher tile. nomadLcdRegister()
+     * lives in the lcd/ slice and compiles to a no-op stub in non-LCD builds, so
+     * this is unconditional — the consumer's app_main wires nothing. The lcd task
+     * reads the launcher registry lazily, so registering here is fine. */
+    nomadLcdRegister();
 }
