@@ -686,4 +686,10 @@ extern "C" void nomadLcdRegister(void) {
     lcdRegisterSettings("Reticulum/Nomad", "Nomad", nomadSettingsPane);
 }
 
+#else /* !CONFIG_SPANGAP_LCD */
+
+/* No-op stub so nomadInit()'s unconditional nomadLcdRegister() links in non-LCD
+ * (--no-lcd) builds, where the launcher program above compiles to nothing. */
+extern "C" void nomadLcdRegister(void) {}
+
 #endif /* CONFIG_SPANGAP_LCD */
