@@ -26,11 +26,11 @@
  *   nomad.cmd.go = "<hash>:<path>"                      navigate sentinel
  * Everything runs on the lcd task; storage subscriptions dispatch there, so
  * we touch LVGL straight from the change callback.
+ *
+ * This whole file lives under conditional/spangap-lcd/, compiled only when the
+ * lcd straddle is staged, so no #if is needed and the register fn below is a
+ * when:-gated init: hook (spangap/spangap-lcd) rather than a self-call.
  */
-#include "sdkconfig.h"
-
-#if CONFIG_SPANGAP_LCD
-
 #include "lcd.h"
 #include "storage.h"
 #include "compat.h"
@@ -681,15 +681,11 @@ void nomadSettingsPane(void* arg) {
 
 }  // namespace
 
-extern "C" void nomadLcdRegister(void) {
+/* Register the Nomad-browser launcher program — a when:-gated init: hook
+ * (spangap/spangap-lcd). This whole file lives under conditional/spangap-lcd/,
+ * compiled only when the lcd straddle is staged, so no #if is needed. Plain
+ * C++ linkage to match the generated dispatcher's forward decl. */
+void nomadLcdRegister(void) {
     lcdRegister("Nomad", "rns", nomadApp);
     lcdRegisterSettings("Reticulum/Nomad", "Nomad", nomadSettingsPane);
 }
-
-#else /* !CONFIG_SPANGAP_LCD */
-
-/* No-op stub so nomadInit()'s unconditional nomadLcdRegister() links in non-LCD
- * (--no-lcd) builds, where the launcher program above compiles to nothing. */
-extern "C" void nomadLcdRegister(void) {}
-
-#endif /* CONFIG_SPANGAP_LCD */

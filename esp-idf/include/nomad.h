@@ -37,9 +37,3 @@
  *  run by the generated spangapInitStraddles() dispatcher after rnsd + the
  *  transports, so consumers wire nothing. */
 void nomadInit(void);
-
-/** Register the Nomad-browser LCD launcher program with the lcd task.
- *  Implemented in the lcd/ slice (esp-idf/lcd/src/nomad_lcd.cpp), gated
- *  on CONFIG_SPANGAP_LCD; a no-op stub in non-LCD builds. Called by
- *  nomadInit() itself, so consumers never wire it. */
-extern "C" void nomadLcdRegister(void);

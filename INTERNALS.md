@@ -49,15 +49,15 @@ s.nomad.bookmarks.<n>.
 
 ## LCD slice
 
-`esp-idf/lcd/src/nomad_lcd.cpp` — C++ Micron-to-LVGL renderer. Picked
-up by the `spangap-lcd` activator, registered as a launcher program.
+`esp-idf/conditional/spangap-lcd/src/nomad_lcd.cpp` — C++ Micron-to-LVGL
+renderer. Picked up by the `spangap-lcd` activator, registered as a
+launcher program.
 
 ## Activator caveat
 
-Same as lxmf: the LCD slice is hard-coded into the firmware
-`CMakeLists.txt` for now (activator-driven source-list exclusion is a
-future feature). The slice body is wrapped in
-`#if CONFIG_SPANGAP_LCD` until then.
+Same as lxmf: the LCD slice lives under `esp-idf/conditional/spangap-lcd/`,
+compiled only when `spangap-lcd` is staged, and registers via the
+when:-gated `nomadLcdRegister` init: hook — no `#if` anywhere.
 
 ## Status
 

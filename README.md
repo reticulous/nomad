@@ -27,7 +27,7 @@ nomad/
 ```
 
 The LCD slice is the on-device Nomad browser program: a C++
-Micron→LVGL renderer, gated on `CONFIG_SPANGAP_LCD`.
+Micron→LVGL renderer, compiled only when `spangap-lcd` is staged.
 
 ## How others use it
 
