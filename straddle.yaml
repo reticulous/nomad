@@ -18,11 +18,6 @@ browser: browser
 platforms: [idf]
 requires:
   - reticulous/rns
-optional_requires:
-  # On-device Nomad browser — conditional/spangap-lcd/src/nomad_lcd.cpp,
-  # compiled only when spangap-lcd is staged and registered via the
-  # when:-gated nomadLcdRegister init: hook below.
-  - spangap/spangap-lcd
 # Auto-init: folded into the generated spangapInitStraddles() dispatcher. Runs
 # in the straddle band; `requires: reticulous/rns` puts rnsd ahead of it, and
 # the platform band guarantees the lcd task already exists. The on-device
