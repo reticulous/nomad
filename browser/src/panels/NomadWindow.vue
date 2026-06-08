@@ -41,10 +41,16 @@
         <div class="body">
           <!-- sidebar -->
           <div class="side">
+            <input
+              v-model="sideQ" class="side-search"
+              placeholder="Search nodes" autocomplete="off"
+              @keydown.esc="sideQ = ''"
+            />
+
             <div class="side-h">Bookmarks</div>
-            <div v-if="nomad.bookmarks.value.length === 0" class="side-empty">none</div>
+            <div v-if="filteredBookmarks.length === 0" class="side-empty">{{ sideQ.trim() ? 'no matches' : 'none' }}</div>
             <div
-              v-for="b in nomad.bookmarks.value" :key="b.hash"
+              v-for="b in filteredBookmarks" :key="b.hash"
               class="item" :class="{ active: b.hash === curHash }"
               :title="b.hash" @click="navigate(b.hash, DEFAULT_PAGE)"
             >
@@ -53,9 +59,9 @@
             </div>
 
             <div class="side-h">On the Mesh</div>
-            <div v-if="nomad.nodes.value.length === 0" class="side-empty">none heard yet</div>
+            <div v-if="filteredNodes.length === 0" class="side-empty">{{ sideQ.trim() ? 'no matches' : 'none heard yet' }}</div>
             <div
-              v-for="n in nomad.nodes.value" :key="n.hash"
+              v-for="n in filteredNodes" :key="n.hash"
               class="item" :class="{ active: n.hash === curHash }"
               :title="n.hash" @click="navigate(n.hash, DEFAULT_PAGE)"
             >
@@ -105,6 +111,21 @@ const nomad = useNomad()
 
 const address = ref('')
 const pageEl = ref<HTMLElement | null>(null)
+
+/* Sidebar filter — name or hash substring, over both sections. */
+const sideQ = ref('')
+const filteredBookmarks = computed(() => {
+  const needle = sideQ.value.trim().toLowerCase()
+  if (!needle) return nomad.bookmarks.value
+  return nomad.bookmarks.value.filter(b =>
+    b.name.toLowerCase().includes(needle) || b.hash.toLowerCase().includes(needle))
+})
+const filteredNodes = computed(() => {
+  const needle = sideQ.value.trim().toLowerCase()
+  if (!needle) return nomad.nodes.value
+  return nomad.nodes.value.filter(n =>
+    n.name.toLowerCase().includes(needle) || n.hash.toLowerCase().includes(needle))
+})
 
 /* Frontend-owned history. Each navigate pushes; back replays. */
 const history = ref<{ hash: string; path: string }[]>([])
@@ -286,6 +307,12 @@ watch(() => [nomad.navHash.value, nomad.navPath.value], () => {
   width: 30%; max-width: 240px; min-width: 120px; overflow: auto;
   border-right: 1px solid rgba(255,255,255,0.08); background: #181818; padding: 4px;
 }
+.side-search {
+  width: 100%; box-sizing: border-box; margin: 2px 0 4px;
+  background: #141414; border: 1px solid rgba(255,255,255,0.15); color: #e8e8e8;
+  border-radius: 5px; padding: 5px 8px; font-size: calc(12px * var(--rfs, 1)); outline: none;
+}
+.side-search:focus { border-color: rgba(120,170,140,0.6); }
 .side-h {
   font-size: calc(11px * var(--rfs, 1)); text-transform: uppercase; letter-spacing: 0.06em;
   color: #888; padding: 8px 6px 4px;
