@@ -201,17 +201,8 @@ export function useNomad(): UseNomad {
 export function registerNomad() {
   const menu = useMenuStore()
 
-  menu.register('settings', 'Settings', [
-    { id: 'reticulum', label: 'Reticulum', type: 'submenu',
-      children: [
-        { id: 'reticulum.nomad', label: 'Nomad Network', type: 'panel',
-          component: NomadPanel },
-      ],
-    },
-  ])
+  menu.register('settings/reticulum/nomad', 'Nomad Network', { type: 'panel', component: NomadPanel })
 
-  menu.register('status', 'Status', [
-    { id: 'status.nomad', label: 'Nomad Browser', type: 'action',
-      action: () => { nomadVisible.value = !nomadVisible.value } },
-  ])
+  menu.register('status/nomad', 'Nomad Browser',
+    { type: 'action', action: () => { nomadVisible.value = !nomadVisible.value } })
 }
