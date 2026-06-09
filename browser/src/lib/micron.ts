@@ -88,11 +88,12 @@ function styleActive(s: Style): boolean {
 /** Render one line's inline content (the `text` after any block prefix has
  *  been stripped). Returns { html, align } — align is set if a `c/`l/`r/`a
  *  control appeared. */
-function renderInline(text: string): { html: string; align: string | null } {
+function renderInline(text: string): { html: string; align: string | null; bg: boolean } {
   let out = ''
   let align: string | null = null
   let st = freshStyle()
   let spanOpen = false
+  let bgUsed = false   // any visible char drawn over a background color → mosaic row
 
   const closeSpan = () => { if (spanOpen) { out += '</span>'; spanOpen = false } }
   const syncSpan = () => {
@@ -102,7 +103,7 @@ function renderInline(text: string): { html: string; align: string | null } {
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!
-    if (ch !== '`') { out += escapeHtml(ch); continue }
+    if (ch !== '`') { if (st.bg) bgUsed = true; out += escapeHtml(ch); continue }
 
     // ` control sequence
     const nx = text[i + 1]
@@ -166,8 +167,12 @@ function renderInline(text: string): { html: string; align: string | null } {
     i += 1
   }
   closeSpan()
-  return { html: out, align }
+  return { html: out, align, bg: bgUsed }
 }
+
+/* Rows carrying block/box-drawing/braille glyphs (or legacy-computing mosaics)
+ * are "graphics" and must tile vertically — see micronToHtml's .mgfx tag. */
+const MOSAIC_RE = /[─-▟⠀-⣿\u{1FB00}-\u{1FBFF}]/u
 
 /** Render a full Micron document to an HTML string. */
 export function micronToHtml(src: string): string {
@@ -208,9 +213,12 @@ export function micronToHtml(src: string): string {
       continue
     }
 
-    const { html, align } = renderInline(raw)
+    const { html, align, bg } = renderInline(raw)
     const a = align ? ` style="text-align:${align}"` : ''
-    out.push(`<div class="mline"${a}>${html}</div>`)
+    // Graphics rows (block/box glyphs or background-colour mosaics) tile only
+    // with zero leading; tag them so the viewer drops their line-height.
+    const gfx = bg || MOSAIC_RE.test(raw)
+    out.push(`<div class="mline${gfx ? ' mgfx' : ''}"${a}>${html}</div>`)
   }
   if (literal) flushLiteral()
   return out.join('\n')

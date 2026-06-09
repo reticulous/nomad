@@ -745,6 +745,13 @@ static void nomadTaskMain(void*)
     /* Reflect rnsd's per-fetch Link progress into nomad.nav.status. */
     storageSubscribeChanges("rnsd.links." NOMAD_FETCH_TAG ".state", onLinkState);
 
+    /* Gate first contact with rnsd on a known-valid clock (or the bounded
+     * wait), like lxmf and the transports. rnsd itself only stands up its ITS
+     * server surface after the same wait, so connecting earlier just spins on
+     * "not initialised as a server" rejects for ~30 s of boot. Waiting lets us
+     * connect once, cleanly, right after rnsd comes up. */
+    waitForTime(0);
+
     connectAnnounceSub();
     s_fetch.handle = -1;   /* 0 is a valid ITS handle; start unset */
     navSet("idle");
