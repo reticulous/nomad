@@ -7,7 +7,7 @@
 
     <div class="text-caption text-grey-5">
       Browse Nomad Network pages (the "text web" over Reticulum). Open the
-      browser from <b>Status → Nomad Browser</b>, or:
+      browser from the <b>Nomad Browser</b> menu, or:
     </div>
     <button class="open-btn" @click="openBrowser">Open Nomad Browser</button>
 

@@ -1,4 +1,4 @@
-<!-- Status → Nomad Browser. The Nomad Network page browser: address bar +
+<!-- Nomad Browser menu. The Nomad Network page browser: address bar +
      back, a two-section sidebar (bookmarks on top, announce-drift below),
      and a page view rendering Micron via the TS renderer. History is
      frontend-owned (the firmware is stateless re history). -->

@@ -16,8 +16,15 @@ import { useDeviceStore } from 'spangap-browser/stores/device'
 import { useMenuStore } from 'spangap-browser/stores/menu'
 import NomadPanel from '../panels/NomadPanel.vue'
 
-/* Visibility ref for the Status → Nomad Browser floating window. */
+/* Visibility ref for the Nomad Browser floating window. */
 export const nomadVisible = ref(false)
+
+/** Focus nonce — bumped to raise the Nomad window even when already open.
+ *  MainLayout binds it to the window's `focus-token` prop. */
+export const nomadFocus = ref(0)
+
+/* Menu "Nomad Browser" action: only ever show + raise, never hide. */
+export function showNomad() { nomadVisible.value = true; nomadFocus.value++ }
 
 export const DEFAULT_PAGE = '/page/index.mu'
 
@@ -201,8 +208,11 @@ export function useNomad(): UseNomad {
 export function registerNomad() {
   const menu = useMenuStore()
 
-  menu.register('settings/reticulum/nomad', 'Nomad Network', { type: 'panel', component: NomadPanel })
+  /* Settings → Mesh Network → Nomad Network (the Nomad settings panel). */
+  menu.register('settings/mesh/nomad', 'Nomad Network', { type: 'panel', component: NomadPanel }, { placement: 4 })
 
-  menu.register('status/nomad', 'Nomad Browser',
-    { type: 'action', action: () => { nomadVisible.value = !nomadVisible.value } })
+  /* Top-level "Nomad Browser" menu — single action foregrounds the window. */
+  menu.setMenu('nomad', { label: 'Nomad Browser', placement: 3 })
+  menu.register('nomad/browser', 'Nomad Browser',
+    { type: 'action', action: showNomad })
 }
