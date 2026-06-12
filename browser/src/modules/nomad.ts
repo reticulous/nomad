@@ -84,6 +84,9 @@ export interface UseNomad {
   isBookmarked: (hash: string) => boolean
   addBookmark: (hash: string, name?: string, note?: string) => void
   delBookmark: (hash: string) => void
+  /** Open an LXMF conversation for an lxmf@<hash> address tapped in a page
+   *  (writes the shared `lxmf.url_web` var; LXMF reacts). */
+  openLxmf: (hash: string) => void
 }
 
 const HASH_RE = /^[0-9a-fA-F]{32}$/
@@ -199,9 +202,18 @@ export function useNomad(): UseNomad {
     device.sendJson(nest('nomad.cmd.bookmark.del', hash.trim().toLowerCase()))
   }
 
+  /* An lxmf@<hash> address tapped in a page hands the contact to LXMF, which
+   * brings its own UI forward and (for an unknown contact) issues a path
+   * request. Decoupled — we only write the shared storage var. */
+  const openLxmf = (hash: string) => {
+    const h = hash.trim().toLowerCase()
+    if (!HASH_RE.test(h)) return
+    device.sendJson(nest('lxmf.url_web', h))
+  }
+
   return {
     nodes, bookmarks, page, navStatus, navHash, navPath, navError, busy,
-    go, goUrl, reload, submit, isBookmarked, addBookmark, delBookmark,
+    go, goUrl, reload, submit, isBookmarked, addBookmark, delBookmark, openLxmf,
   }
 }
 

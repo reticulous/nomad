@@ -103,7 +103,22 @@ function renderInline(text: string): { html: string; align: string | null; bg: b
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!
-    if (ch !== '`') { if (st.bg) bgUsed = true; out += escapeHtml(ch); continue }
+    if (ch !== '`') {
+      // Bare lxmf@<32hex> → clickable contact link (not mid-token).
+      if ((ch === 'l' || ch === 'L') && (i === 0 || !/[0-9a-z@._-]/i.test(text[i - 1]!))) {
+        const m = /^lxmf@([0-9a-fA-F]{32})\b/.exec(text.slice(i))
+        if (m) {
+          const wasOpen = spanOpen
+          closeSpan()
+          const hash = m[1]!.toLowerCase()
+          out += `<a class="mlxmf" data-lxmf="${hash}" title="lxmf@${hash}">${escapeHtml(m[0]!)}</a>`
+          if (wasOpen && styleActive(st)) { out += `<span style="${styleCss(st)}">`; spanOpen = true }
+          i += m[0]!.length - 1
+          continue
+        }
+      }
+      if (st.bg) bgUsed = true; out += escapeHtml(ch); continue
+    }
 
     // ` control sequence
     const nx = text[i + 1]

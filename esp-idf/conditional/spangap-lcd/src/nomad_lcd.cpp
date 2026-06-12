@@ -113,6 +113,7 @@ bool s_subscribed = false;
  * (intptr_t user_data) into these — no per-widget heap, no dangling
  * pointers. Rebuilt with each screen. */
 std::vector<std::string> s_linkTargets;
+std::vector<std::string> s_lxmfTargets;   /* lxmf@<hash> link dest hashes, by index */
 std::vector<std::string> s_rowHashes;
 
 /* Form fields on the current page: name → its LVGL textarea. Read when a
@@ -129,6 +130,24 @@ bool isHash(std::string_view s) {
     for (char c : s)
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
             return false;
+    return true;
+}
+
+/* Match "lxmf@" + 32 hex at line[pos], not followed by a 33rd hex digit.
+ * Case-insensitive prefix + hex; fills `hash` with the lowercase 32-hex. */
+bool matchLxmfAt(const std::string& line, size_t pos, std::string& hash) {
+    static const char pfx[] = "lxmf@";
+    auto hex = [](char c){ return (c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F'); };
+    if (pos + 5 + 32 > line.size()) return false;
+    for (int k = 0; k < 5; k++) {
+        char a = line[pos + k];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (a != pfx[k]) return false;
+    }
+    for (int k = 0; k < 32; k++) if (!hex(line[pos + 5 + k])) return false;
+    if (pos + 5 + 32 < line.size() && hex(line[pos + 5 + 32])) return false;
+    hash.assign(line, pos + 5, 32);
+    for (auto& c : hash) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
     return true;
 }
 
@@ -226,6 +245,14 @@ void followTarget(const std::string& target) {
         }
     }
 
+    /* An lxmf@<hash> target opens an LXMF conversation instead of navigating —
+     * hand the dest hash to LXMF via its inbound link var (lxmf_lcd subscribes). */
+    std::string lxh;
+    if (url.size() == 5 + 32 && matchLxmfAt(url, 0, lxh)) {
+        storageSet("lxmf.url_lcd", lxh.c_str());
+        return;
+    }
+
     std::string hash, path;
     if (!resolveUrl(url, hash, path)) return;
 
@@ -259,7 +286,7 @@ void onLinkClick(lv_event_t* e) {
  * align) for the LCD and keep links. A run is plain text; a link is a
  * clickable, focusable label. */
 
-enum SegKind { SEG_TEXT, SEG_LINK, SEG_FIELD };
+enum SegKind { SEG_TEXT, SEG_LINK, SEG_LXMF, SEG_FIELD };
 struct Seg { SegKind kind; std::string text; std::string target; std::string fname, fvalue; };
 
 std::vector<Seg> scanInline(const std::string& line) {
@@ -268,7 +295,19 @@ std::vector<Seg> scanInline(const std::string& line) {
     auto flush = [&]() { if (!cur.empty()) { segs.push_back({ SEG_TEXT, cur, "", "", "" }); cur.clear(); } };
     for (size_t i = 0; i < line.size(); i++) {
         char ch = line[i];
-        if (ch != '`') { cur += ch; continue; }
+        if (ch != '`') {
+            /* Bare lxmf@<32hex> → tappable contact link (not mid-token). */
+            std::string lxh;
+            char prev = i ? line[i - 1] : 0;
+            bool prevWord = (prev>='0'&&prev<='9')||(prev>='a'&&prev<='z')||(prev>='A'&&prev<='Z');
+            if ((ch == 'l' || ch == 'L') && !prevWord && matchLxmfAt(line, i, lxh)) {
+                flush();
+                segs.push_back({ SEG_LXMF, line.substr(i, 5 + 32), lxh, "", "" });
+                i += (5 + 32) - 1;
+                continue;
+            }
+            cur += ch; continue;
+        }
         if (i + 1 >= line.size()) break;
         char nx = line[i + 1];
         switch (nx) {
@@ -320,6 +359,24 @@ void addLink(lv_obj_t* parent, const Seg& s) {
     if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), l);
 }
 
+void onLxmfClick(lv_event_t* e) {
+    size_t idx = (size_t)(intptr_t)lv_event_get_user_data(e);
+    if (idx < s_lxmfTargets.size()) storageSet("lxmf.url_lcd", s_lxmfTargets[idx].c_str());
+}
+
+/* lxmf@<hash> link: like addLink but green and writes lxmf.url_lcd (LXMF
+ * brings itself forward + opens the thread) instead of navigating a page. */
+void addLxmf(lv_obj_t* parent, const Seg& s) {
+    lv_obj_t* l = mkLabel(parent, printable(s.text, true, kPageFont), lv_color_hex(0x7fd0a0), kPageFont);
+    lv_obj_set_style_text_decor(l, LV_TEXT_DECOR_UNDERLINE, 0);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(l, 6);
+    size_t idx = s_lxmfTargets.size();
+    s_lxmfTargets.push_back(s.target);
+    lv_obj_add_event_cb(l, onLxmfClick, LV_EVENT_CLICKED, (void*)(intptr_t)idx);
+    if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), l);
+}
+
 void addField(lv_obj_t* parent, const Seg& s) {
     lv_obj_t* ta = lv_textarea_create(parent);
     lv_textarea_set_one_line(ta, true);
@@ -363,6 +420,7 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel) {
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     for (auto& s : segs) {
         if      (s.kind == SEG_LINK)  addLink(row, s);
+        else if (s.kind == SEG_LXMF)  addLxmf(row, s);
         else if (s.kind == SEG_FIELD) addField(row, s);
         else                          mkLabel(row, printable(s.text, true, kPageFont), color, kPageFont);
     }
@@ -473,6 +531,7 @@ void rebuildPage() {
     if (!s_pageBody) return;
     lv_obj_clean(s_pageBody);
     s_linkTargets.clear();
+    s_lxmfTargets.clear();
     s_fields.clear();
 
     std::string status = storageGetStr("nomad.nav.status", "");
@@ -647,6 +706,7 @@ void nomadApp(void* arg) {
     s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr; s_status = nullptr;
     s_curHash.clear();
     s_linkTargets.clear();
+    s_lxmfTargets.clear();
     s_rowHashes.clear();
     s_fields.clear();
 

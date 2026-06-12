@@ -45,6 +45,12 @@ static const char* TAG = "nomad";
 #define NOMAD_CACHE_MAX_ENTRIES    16
 #define NOMAD_CACHE_MAX_BYTES      (512 * 1024)
 
+/* Max page bytes published to the SPA in a single storage patch. The storage
+ * DataChannel negotiates a 256 KB max-message-size (webrtc_task.cpp), so a page
+ * rides one patch; 128 KB keeps us clear of that ceiling after JSON escaping.
+ * Larger pages fall back to the on-device LCD / RAM cache. */
+#define NOMAD_MAX_PAGE_PUBLISH     (128 * 1024)
+
 /* RNSD_PORT_ANNOUNCES frame: hops(1) | dest_hash(16) | identity_hash(16) | app_data(N) */
 constexpr size_t NOMAD_ANNOUNCE_HDR = 1 + 16 + 16;
 constexpr size_t NOMAD_DEST_HASH_LEN = 16;
@@ -209,13 +215,11 @@ static void publishPage(const std::string& hash, const std::string& path,
     storageSet("nomad.page.fetched_s", nowUnixS());
 
     /* Publish the body to the (ephemeral) config tree so the SPA renders
-     * it via the normal storage DC sync — the browser receives full
-     * values (the 128 B cap is only the in-device change notification).
-     * Capped to stay well under the DC patch limit; the full bytes always
-     * live in the RAM cache (the LCD renderer reads those). Micron is
-     * UTF-8 text, so a cJSON string value is the right carrier. */
-    int cap = storageGetInt("s.nomad.max_page_publish", 32768);
-    if ((int)len <= cap) {
+     * it via the normal storage DC sync — the browser receives full values
+     * (the 128 B cap is only the in-device change notification). The full
+     * bytes always live in the RAM cache (the LCD renderer reads those).
+     * Micron is UTF-8 text, so a cJSON string value is the right carrier. */
+    if ((int)len <= NOMAD_MAX_PAGE_PUBLISH) {
         std::string b(reinterpret_cast<const char*>(body), len);
         storageSet("nomad.page.body", b.c_str());
         storageSet("nomad.page.truncated", 0);
@@ -774,7 +778,6 @@ void nomadInit(void)
     if (storageGetInt("s.nomad.version", 0) < NOMAD_VERSION) {
         storageBegin();
         storageDefault("s.nomad.max_nodes", 256);          /* announce-drift cap; 0 disables */
-        storageDefault("s.nomad.max_page_publish", 32768); /* max page bytes synced to the SPA */
         storageSet("s.nomad.version", NOMAD_VERSION);
         storageEnd();
     }

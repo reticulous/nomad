@@ -50,8 +50,8 @@
 
         <!-- address bar -->
         <div class="bar">
-          <button class="nav" :disabled="!canBack" title="Back" @click="back">‹</button>
-          <button class="nav" title="Reload" :disabled="!curHash" @click="reload">⟳</button>
+          <button class="nav glyph" :disabled="!canBack" title="Back" @click="back"><span class="g">‹</span></button>
+          <button class="nav glyph" title="Reload" :disabled="!curHash" @click="reload"><span class="g">⟳</span></button>
           <input
             v-model="address"
             class="addr mono"
@@ -103,7 +103,13 @@
           <!-- page view -->
           <div class="view">
             <div class="status" :class="statusClass">
-              <span class="dot" />{{ statusText }}
+              <span class="dot" /><span class="status-text">{{ statusText }}</span>
+              <button
+                v-if="activeTab && activeTab.body"
+                class="src-toggle"
+                :title="viewSource ? 'Show rendered page' : 'Show Micron source'"
+                @click="viewSource = !viewSource"
+              >{{ viewSource ? 'view page' : 'view source' }}</button>
             </div>
             <div v-if="showError" class="page-msg err">
               Could not load the page.<span v-if="activeTab && activeTab.error"> ({{ activeTab.error }})</span>
@@ -114,6 +120,7 @@
             <div v-else-if="!activeTab || !activeTab.body" class="page-msg dim">
               Pick a bookmark or node, or enter an address above.
             </div>
+            <pre v-else-if="viewSource" class="page source">{{ activeTab.body }}</pre>
             <div v-else ref="pageEl" class="page" v-html="pageHtml" @click="onPageClick" />
           </div>
         </div>
@@ -174,6 +181,9 @@ const activeTab = computed<Tab | undefined>(() => tabs.find(t => t.id === active
 
 const pageEl = ref<HTMLElement | null>(null)
 const address = ref('')
+
+/* View toggle: rendered page (default) vs. raw Micron source. */
+const viewSource = ref(false)
 
 /* Sidebar collapse, persisted client-side. */
 const LS_SIDE = 'nomad.sideOpen'
@@ -409,6 +419,10 @@ function parseTarget(target: string): { url: string; fields: string[]; vars: Rec
 function followTarget(target: string, newTabReq: boolean) {
   if (!target.trim()) return
   const { url, fields, vars } = parseTarget(target)
+  // A link whose target is an lxmf@<hash> address opens an LXMF conversation
+  // instead of navigating to a page.
+  const lx = /^lxmf@([0-9a-fA-F]{32})$/i.exec(url.trim())
+  if (lx) { nomad.openLxmf(lx[1]!.toLowerCase()); return }
   const r = resolveUrl(url)
   if (!r) return
 
@@ -443,7 +457,15 @@ function followTarget(target: string, newTabReq: boolean) {
 }
 
 function onPageClick(ev: MouseEvent) {
-  const el = (ev.target as HTMLElement)?.closest('a.mlink') as HTMLElement | null
+  const t = ev.target as HTMLElement | null
+  const lx = t?.closest('a.mlxmf') as HTMLElement | null
+  if (lx) {
+    ev.preventDefault()
+    const h = lx.getAttribute('data-lxmf')
+    if (h) nomad.openLxmf(h)
+    return
+  }
+  const el = t?.closest('a.mlink') as HTMLElement | null
   if (!el) return
   ev.preventDefault()
   const target = el.getAttribute('data-mtarget')
@@ -529,7 +551,12 @@ watch(
 }
 .nav:hover:not(:disabled) { background: #353535; }
 .nav:disabled { opacity: 0.4; cursor: default; }
-.nav.go { font-size: 12px; }
+/* back ‹ and reload ⟳ glyphs were tiny — bump to 250%; Go/star to 125% */
+.nav.glyph { font-size: 35px; line-height: 1; padding: 0 12px; }
+/* both glyphs sit optically low in their box — raise by 30% of char height */
+.nav.glyph .g { display: inline-block; transform: translateY(-30%); }
+.nav.go { font-size: 17.5px; }
+.nav.star { font-size: 17.5px; }
 .nav.star.on { color: #ffd24a; border-color: rgba(255,210,74,0.4); }
 .addr {
   flex: 1; background: #141414; border: 1px solid rgba(255,255,255,0.15);
@@ -568,6 +595,19 @@ watch(
   padding: 5px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); background: #1a1a1a;
 }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+.status .status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* view source / view page toggle, pushed to the right edge of the status line */
+.src-toggle {
+  margin-left: auto; flex: none; background: #2a2a2a; border: 1px solid rgba(255,255,255,0.15);
+  color: #cdd6df; border-radius: 4px; padding: 1px 8px; cursor: pointer;
+  font-size: calc(11px * var(--rfs, 1)); font-family: inherit;
+}
+.src-toggle:hover { background: #353535; color: #fff; }
+/* raw Micron source view */
+.page.source {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: 'JetBrains Mono', 'Menlo', monospace; color: #cfd3d8;
+}
 .status.busy .dot { background: #e0a72a; animation: pulse 1s infinite; }
 .status.ok .dot { background: #4abf6a; }
 .status.bad .dot { background: #d9534f; }
@@ -602,6 +642,9 @@ watch(
 }
 .page :deep(.mlink) { color: #6db3ff; cursor: pointer; text-decoration: underline; }
 .page :deep(.mlink:hover) { color: #9ccbff; }
+/* lxmf@<hash> contact links — green to distinguish from page navigation. */
+.page :deep(.mlxmf) { color: #7fd0a0; cursor: pointer; text-decoration: underline; }
+.page :deep(.mlxmf:hover) { color: #a6e3c2; }
 .page :deep(.mfield) {
   background: #141414; border: 1px solid rgba(255,255,255,0.2); color: #ccc;
   border-radius: 4px; padding: 1px 5px; font-size: 0.92em; margin: 0 2px;
