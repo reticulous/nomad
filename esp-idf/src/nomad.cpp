@@ -8,12 +8,19 @@
  *
  *   announce drift : subscribe RNSD_PORT_ANNOUNCES filtered to
  *                    nomadnetwork.node → nomad.nodes.<hex> LRU.
- *   navigate       : nomad.cmd.go = <hash>[:<path>] → rnsdLinkOpen +
+ *   navigate       : nomad.cmd.go = [<sid>|]<hash>[:<path>] → rnsdLinkOpen +
  *                    rnsdLinkRequest(path) → response bytes (REQUEST_RESPONSE
- *                    aux). Statuses → nomad.nav.*.
+ *                    aux). Statuses → nomad.s<sid>.nav.*, page bytes →
+ *                    nomad.s<sid>.page.*. Sessions are parallel browser
+ *                    contexts (0-5 web tabs, 6 LCD), each holding one Link.
  *   page cache     : hash:path → bytes (RAM/PSRAM). Re-view = zero air time.
- *                    nomad.cmd.reload bypasses.
- *   bookmarks      : s.nomad.bookmarks.<hex> = <name>|<note> (persistent).
+ *                    nomad.cmd.reload bypasses the cache READ; the entry
+ *                    stays until fresh bytes replace it, so a failed reload
+ *                    keeps the old copy reachable. Writers put a unique
+ *                    value in the sentinel (tick/time), not a constant:
+ *                    a constant re-write would be swallowed by the storage
+ *                    SET-dedup if a change notify was ever dropped.
+ *   bookmarks      : s.nomad.bookmarks.<id> = <hash>[:<path>]|<name>|<note>.
  */
 #include "nomad.h"
 #include "spangap.h"
@@ -37,9 +44,15 @@ static const char* TAG = "nomad";
 #define NOMAD_VERSION              1
 #define NOMAD_PUBLISH_INTERVAL_MS  1000
 #define NOMAD_ASPECT               "nomadnetwork.node"
-#define NOMAD_FETCH_TAG            "nomad"          /* rnsdLinkOpen tag (≤23) */
+#define NOMAD_FETCH_TAG            "nomad"          /* rnsdLinkOpen tag prefix: "nomad<sid>" (≤23) */
 #define NOMAD_RESP_PORT            130              /* request-response aux port */
 #define NOMAD_DEFAULT_PAGE         "/page/index.mu"
+
+/* NOMAD_SESSIONS / NOMAD_LCD_SESSION live in nomad.h (the LCD slice and
+ * frontends share them). Each session may hold one open Link, so nomad's
+ * share of the device link budget is NOMAD_SESSIONS (the budget: 12 links
+ * total — 6 web tabs, 1 LCD, 5 for other consumers like lxmf; rnsd
+ * slots = 32, plenty). */
 
 /* Page cache caps (PSRAM). Re-viewing a cached page costs zero air time. */
 #define NOMAD_CACHE_MAX_ENTRIES    16
@@ -166,14 +179,19 @@ static void cachePut(const std::string& key, const uint8_t* body, size_t len)
         cacheEvictOldest();
 }
 
-/* ─────────────── navigation / fetch state ─────────────── */
 
-/* Like NomadNet's browser, we keep ONE Link to the current node open and
- * reuse it for every request to that node; it's dropped only on a node
- * change or a failure (or when Reticulum closes it idle/STALE, surfaced via
- * onFetchLinkDisc). So same-node navigation has no re-establish cost and no
- * per-fetch ITS-conn churn. One request in flight at a time (v1). */
-static struct {
+/* ─────────────── navigation / fetch state (sessions) ─────────────── */
+
+/* Parallel browsing sessions. Each session is an independent NomadNet
+ * browser context with its own Link, in-flight request, and published
+ * nav/page state (nomad.s<sid>.nav.* / nomad.s<sid>.page.*). Per session
+ * the NomadNet model holds: ONE Link to the current node, reused for every
+ * request to that node, dropped on node change / failure / idle-STALE
+ * close; one request in flight at a time. Sessions 0-5 belong to the web
+ * UI's tabs, session 6 to the LCD browser (NOMAD_LCD_SESSION). The page
+ * cache is shared across sessions. Link tags are "nomad<sid>"; the
+ * session id rides the conn ref (itsRef / disconnect-cb arg). */
+struct Session {
     bool        active;     /* a request is in flight */
     bool        terminal;   /* done/failed already published for this fetch */
     bool        submit;     /* form submit (don't cache the response) */
@@ -183,9 +201,40 @@ static struct {
     std::string hash;       /* 32-hex target of the current request */
     std::string path;
     int         started_s;
-} s_fetch = {};   /* handle set to -1 in nomadTaskMain before any fetch */
+};
+static Session s_sess[NOMAD_SESSIONS] = {};  /* handles set to -1 in nomadTaskMain */
 
-static void navSet(const char* status) { storageSet("nomad.nav.status", status); }
+static bool validSid(int sid) { return sid >= 0 && sid < NOMAD_SESSIONS; }
+
+static void sessTag(int sid, char out[16])
+{
+    std::snprintf(out, 16, NOMAD_FETCH_TAG "%d", sid);
+}
+
+static void sessKey(int sid, const char* tail, char* out, size_t outLen)
+{
+    std::snprintf(out, outLen, "nomad.s%d.%s", sid, tail);
+}
+
+static void navSet(int sid, const char* status)
+{
+    char k[48];
+    sessKey(sid, "nav.status", k, sizeof k);
+    storageSet(k, status);
+}
+
+/* "<sid>|rest" command-value prefix → session id; bare values (CLI habit,
+ * old callers) fall back to session 0. */
+static int parseSid(std::string& cmd)
+{
+    if (cmd.size() >= 2 && cmd[1] == '|' && cmd[0] >= '0' && cmd[0] <= '9') {
+        int sid = cmd[0] - '0';
+        cmd.erase(0, 2);
+        if (validSid(sid)) return sid;
+        return 0;
+    }
+    return 0;
+}
 
 /* One-line page preview for the serial log — a short hex head + a sanitized
  * text fragment (CR/LF/controls folded to '.') + ellipsis. Never dumps the
@@ -204,52 +253,61 @@ static void logPage(const std::string& key, const uint8_t* b, size_t len)
          frag.c_str(), len > fn ? "…" : "");
 }
 
-static void publishPage(const std::string& hash, const std::string& path,
+static void publishPage(int sid, const std::string& hash, const std::string& path,
                         const uint8_t* body, size_t len, bool cache = true)
 {
     std::string key = hash + ":" + path;
     if (cache) cachePut(key, body, len);   /* form-submit results aren't cached */
-    storageSet("nomad.page.hash", hash.c_str());
-    storageSet("nomad.page.path", path.c_str());
-    storageSet("nomad.page.size", (int)len);
-    storageSet("nomad.page.fetched_s", nowUnixS());
+    char k[48];
+    sessKey(sid, "page.hash", k, sizeof k); storageSet(k, hash.c_str());
+    sessKey(sid, "page.path", k, sizeof k); storageSet(k, path.c_str());
+    sessKey(sid, "page.size", k, sizeof k); storageSet(k, (int)len);
+    sessKey(sid, "page.fetched_s", k, sizeof k); storageSet(k, nowUnixS());
 
     /* Publish the body to the (ephemeral) config tree so the SPA renders
      * it via the normal storage DC sync — the browser receives full values
-     * (the 128 B cap is only the in-device change notification). The full
-     * bytes always live in the RAM cache (the LCD renderer reads those).
+     * (in-device change notifies truncate to STORAGE_NOTIFY_VAL_MAX, 512 B:
+     * they're change signals, not value transport; subscribers re-read by
+     * key). The full bytes always live in the RAM cache (the LCD renderer
+     * reads those).
      * Micron is UTF-8 text, so a cJSON string value is the right carrier. */
+    sessKey(sid, "page.body", k, sizeof k);
+    char kt[48];
+    sessKey(sid, "page.truncated", kt, sizeof kt);
     if ((int)len <= NOMAD_MAX_PAGE_PUBLISH) {
         std::string b(reinterpret_cast<const char*>(body), len);
-        storageSet("nomad.page.body", b.c_str());
-        storageSet("nomad.page.truncated", 0);
+        storageSet(k, b.c_str());
+        storageSet(kt, 0);
     } else {
-        storageSet("nomad.page.body", "");
-        storageSet("nomad.page.truncated", 1);   /* too large for the SPA; see LCD/file */
+        storageSet(k, "");
+        storageSet(kt, 1);   /* too large for the SPA; see LCD/file */
     }
     logPage(key, body, len);
 }
 
-/* Close the open link + free our ITS conn. Drop our conn FIRST, then
- * teardown: the disconnect makes rnsd null the slot's handle, so the
+/* Close a session's open link + free our ITS conn. Drop our conn FIRST,
+ * then teardown: the disconnect makes rnsd null the slot's handle, so the
  * teardown's linkFreeSlot skips its own itsDisconnect — only one side ever
  * disconnects the conn, so no stale DISCONNECT can hit a reused handle (the
  * earlier double-free). itsConnect is synchronous + FIFO-after the teardown
  * aux, so a same-tag reopen right after sees the slot already freed. */
-static void dropLink(void)
+static void dropLink(int sid)
 {
-    if (s_fetch.handle >= 0) { itsDisconnect(s_fetch.handle); s_fetch.handle = -1; }
-    rnsdLinkTeardown(NOMAD_FETCH_TAG);
-    s_fetch.link_hash.clear();
+    Session& s = s_sess[sid];
+    if (s.handle >= 0) { itsDisconnect(s.handle); s.handle = -1; }
+    char tag[16];
+    sessTag(sid, tag);
+    rnsdLinkTeardown(tag);
+    s.link_hash.clear();
 }
 
 /* A request concluded. On success keep the link open for same-node reuse;
  * on failure drop it so the next attempt re-establishes cleanly. */
-static void fetchDone(bool ok)
+static void fetchDone(int sid, bool ok)
 {
-    s_fetch.terminal = true;
-    s_fetch.active   = false;
-    if (!ok) dropLink();
+    s_sess[sid].terminal = true;
+    s_sess[sid].active   = false;
+    if (!ok) dropLink(sid);
 }
 
 /* The link's packet handle is unused (responses ride the aux port), but
@@ -260,11 +318,13 @@ static void onFetchLinkRecv(int handle, size_t /*n*/)
     itsRecv(handle, b, sizeof(b), 0);
 }
 /* rnsd closed the link (teardown cascade, or idle/STALE close): our conn is
- * gone, so forget it — the next fetch re-establishes. */
-static void onFetchLinkDisc(int /*handle*/)
+ * gone, so forget it — the next fetch re-establishes. The disconnect cb
+ * receives our conn ref, which carries the session id. */
+static void onFetchLinkDisc(int ref)
 {
-    s_fetch.handle = -1;
-    s_fetch.link_hash.clear();
+    if (!validSid(ref)) return;
+    s_sess[ref].handle = -1;
+    s_sess[ref].link_hash.clear();
 }
 
 /* ─────────────── request-response aux (rnsd → nomad, NOMAD_RESP_PORT) ─────────────── */
@@ -278,47 +338,64 @@ static void onNomadAux(TaskHandle_t /*sender*/, const void* data, size_t len)
     rnsd_link_resource_done_t d;
     std::memcpy(&d, data, sizeof(d));
 
+    /* Correlate the response to its session by request id. */
+    int sid = -1;
+    for (int i = 0; i < NOMAD_SESSIONS; i++)
+        if (s_sess[i].active && (int)d.opaque_id == s_sess[i].req_id) { sid = i; break; }
+
     /* Phase 1 only drives request/response (page GETs). /file Resource
      * downloads (RNSD_LINK_RESOURCE_INBOUND_DONE) are Phase 5. */
     if (d.opcode == RNSD_LINK_REQUEST_RESPONSE) {
-        if (!s_fetch.active || (int)d.opaque_id != s_fetch.req_id) {
+        if (sid < 0) {
             verb("aux: stray response cid=%u (no matching fetch)",
                  (unsigned)d.opaque_id);
             rnsdResourceRelease(d.buf);
             return;
         }
-        info("fetch %s:%s done — %uB", s_fetch.hash.c_str(),
-             s_fetch.path.c_str(), (unsigned)d.len);
-        publishPage(s_fetch.hash, s_fetch.path,
-                    (const uint8_t*)d.buf, d.len, /*cache=*/!s_fetch.submit);
-        navSet("done");
+        Session& s = s_sess[sid];
+        info("s%d fetch %s:%s done — %uB", sid, s.hash.c_str(),
+             s.path.c_str(), (unsigned)d.len);
+        publishPage(sid, s.hash, s.path,
+                    (const uint8_t*)d.buf, d.len, /*cache=*/!s.submit);
+        navSet(sid, "done");
         rnsdResourceRelease(d.buf);   /* we own it on REQUEST_RESPONSE */
-        fetchDone(true);              /* keep the link open for same-node reuse */
+        fetchDone(sid, true);         /* keep the link open for same-node reuse */
         return;
     }
 
     if (d.opcode == RNSD_LINK_REQUEST_FAILED) {
-        if (!s_fetch.active || (int)d.opaque_id != s_fetch.req_id) return;
-        warn("fetch %s:%s failed", s_fetch.hash.c_str(), s_fetch.path.c_str());
-        storageSet("nomad.nav.error", "request failed");
-        navSet("failed");
-        fetchDone(false);            /* drop the link; next attempt re-establishes */
+        if (sid < 0) return;
+        Session& s = s_sess[sid];
+        warn("s%d fetch %s:%s failed", sid, s.hash.c_str(), s.path.c_str());
+        char k[48];
+        sessKey(sid, "nav.error", k, sizeof k);
+        storageSet(k, "request failed");
+        navSet(sid, "failed");
+        fetchDone(sid, false);       /* drop the link; next attempt re-establishes */
         return;
     }
 
     if (d.buf) rnsdResourceRelease(d.buf);   /* unexpected opcode w/ buffer */
 }
 
-/* rnsd publishes the Link's progress to rnsd.links.<tag>.state. Reflect it
- * into nomad.nav.status while a fetch is active so the frontend sees the
- * Browser.py-style progression without nomad re-deriving it. The terminal
- * states (done/failed) are owned by onNomadAux above — don't clobber them. */
-static void onLinkState(const char* /*key*/, const char* val)
+/* rnsd publishes each Link's progress to rnsd.links.nomad<sid>.*. Reflect
+ * the .state keys into that session's nav.status while its fetch is active
+ * so the frontend sees the Browser.py-style progression without nomad
+ * re-deriving it. The terminal states (done/failed) are owned by onNomadAux
+ * above — don't clobber them. */
+static void onLinkState(const char* key, const char* val)
 {
-    if (!s_fetch.active || s_fetch.terminal || !val || !*val) return;
-    if      (std::strcmp(val, "awaiting_path") == 0) navSet("path_requested");
-    else if (std::strcmp(val, "establishing")  == 0) navSet("establishing");
-    else if (std::strcmp(val, "active")        == 0) navSet("requesting");
+    /* key = "rnsd.links.nomad<sid>.state" (the prefix sub also delivers the
+     * tree's other keys — filter to single-digit sid + ".state"). */
+    const char* tail = key + sizeof("rnsd.links." NOMAD_FETCH_TAG) - 1;
+    if (tail[0] < '0' || tail[0] > '9' || std::strcmp(tail + 1, ".state") != 0) return;
+    int sid = tail[0] - '0';
+    if (!validSid(sid)) return;
+    Session& s = s_sess[sid];
+    if (!s.active || s.terminal || !val || !*val) return;
+    if      (std::strcmp(val, "awaiting_path") == 0) navSet(sid, "path_requested");
+    else if (std::strcmp(val, "establishing")  == 0) navSet(sid, "establishing");
+    else if (std::strcmp(val, "active")        == 0) navSet(sid, "requesting");
     /* closing/closed/failed: leave to the aux handler / linkFreeSlot's
      * REQUEST_FAILED, which carries the proper terminal reason. */
 }
@@ -326,83 +403,104 @@ static void onLinkState(const char* /*key*/, const char* val)
 /* ─────────────── navigate ─────────────── */
 
 /* Fetch a page (packed == nullptr → GET) or submit a form (packed == the
- * msgpack {field_*,var_*} map). Submits bypass the cache and aren't cached. */
-static void startFetch(const std::string& hash, const std::string& path,
+ * msgpack {field_*,var_*} map) on session `sid`. Submits bypass the cache
+ * and aren't cached. */
+static void startFetch(int sid, const std::string& hash, const std::string& path,
                        bool bypass_cache, const std::vector<uint8_t>* packed = nullptr)
 {
+    Session& s = s_sess[sid];
+    char k[48];
+    sessKey(sid, "nav.error", k, sizeof k);
+
     uint8_t dh[NOMAD_DEST_HASH_LEN];
     if (!hexToDestHash(hash, dh)) {
-        warn("go: bad hash %s", hash.c_str());
-        storageSet("nomad.nav.error", "bad hash");
-        navSet("failed");
+        warn("s%d go: bad hash %s", sid, hash.c_str());
+        storageSet(k, "bad hash");
+        navSet(sid, "failed");
         return;
     }
 
-    storageSet("nomad.nav.hash", hash.c_str());
-    storageSet("nomad.nav.path", path.c_str());
-    storageSet("nomad.nav.error", "");
+    storageSet(k, "");
+    sessKey(sid, "nav.hash", k, sizeof k); storageSet(k, hash.c_str());
+    sessKey(sid, "nav.path", k, sizeof k); storageSet(k, path.c_str());
 
     std::string key = hash + ":" + path;
+    /* A bypass fetch (reload) skips the cache READ but leaves the entry in
+     * place: fresh bytes replace it on arrival (cachePut refreshes), and if
+     * the refetch fails the old copy survives — Back still shows it. */
     if (!bypass_cache && !packed) {
         if (PageEntry* e = cacheGet(key)) {
-            info("go %s — cache hit (%zuB, zero air time)", key.c_str(),
+            info("s%d go %s — cache hit (%zuB, zero air time)", sid, key.c_str(),
                  e->body.size());
-            publishPage(hash, path, e->body.data(), e->body.size());
-            navSet("done");
+            publishPage(sid, hash, path, e->body.data(), e->body.size());
+            navSet(sid, "done");
             return;
         }
     }
 
+    /* A previous request still in flight on this session can't be joined by
+     * a second (rnsd allows one per link slot) — newest navigation wins:
+     * abandon it, and don't reuse its link (the slot's request stays bound
+     * until it concludes; a fresh slot sidesteps the in-flight guard). */
+    bool wasActive = s.active;
+    if (wasActive) { s.active = false; s.terminal = true; }
+
+    char tag[16];
+    sessTag(sid, tag);
+
     /* Reuse the open link if it's already to this node (NomadNet model);
      * otherwise drop a link to a different node and open a fresh one. */
-    bool reuse = (s_fetch.handle >= 0 && s_fetch.link_hash == hash);
+    bool reuse = (!wasActive && s.handle >= 0 && s.link_hash == hash);
     if (!reuse) {
-        if (s_fetch.handle >= 0) dropLink();   /* link is to a different node */
-        int h = rnsdLinkOpen(dh, NOMAD_ASPECT, /*identity_key=*/"", NOMAD_FETCH_TAG,
-                             /*path_timeout_ms=*/0, /*ref=*/0,
+        if (s.handle >= 0) dropLink(sid);   /* link is to a different node */
+        int h = rnsdLinkOpen(dh, NOMAD_ASPECT, /*identity_key=*/"", tag,
+                             /*path_timeout_ms=*/0, /*ref=*/sid,
                              onFetchLinkRecv, onFetchLinkDisc);
         if (h < 0) {
-            warn("go: rnsdLinkOpen failed (%d)", h);
-            storageSet("nomad.nav.error", "link open failed");
-            navSet("failed");
+            warn("s%d go: rnsdLinkOpen failed (%d)", sid, h);
+            sessKey(sid, "nav.error", k, sizeof k);
+            storageSet(k, "link open failed");
+            navSet(sid, "failed");
             return;
         }
-        s_fetch.handle    = h;
-        s_fetch.link_hash = hash;
+        s.handle    = h;
+        s.link_hash = hash;
     }
     /* rnsd holds the request until the Link is ACTIVE, then issues it (or, on
      * reuse, issues it immediately); a link failure fails the request back to
      * us (REQUEST_FAILED). */
     int rid = packed
-        ? rnsdLinkRequest(NOMAD_FETCH_TAG, path.c_str(), packed->data(), packed->size(),
+        ? rnsdLinkRequest(tag, path.c_str(), packed->data(), packed->size(),
                           NOMAD_RESP_PORT, /*data_packed=*/true)
-        : rnsdLinkRequest(NOMAD_FETCH_TAG, path.c_str(), nullptr, 0, NOMAD_RESP_PORT);
+        : rnsdLinkRequest(tag, path.c_str(), nullptr, 0, NOMAD_RESP_PORT);
     if (rid < 0) {
-        warn("go: rnsdLinkRequest failed (%d)", rid);
-        dropLink();
-        storageSet("nomad.nav.error", "request failed");
-        navSet("failed");
+        warn("s%d go: rnsdLinkRequest failed (%d)", sid, rid);
+        dropLink(sid);
+        sessKey(sid, "nav.error", k, sizeof k);
+        storageSet(k, "request failed");
+        navSet(sid, "failed");
         return;
     }
 
-    s_fetch.active    = true;
-    s_fetch.terminal  = false;
-    s_fetch.submit    = (packed != nullptr);
-    s_fetch.req_id    = rid;
-    s_fetch.hash      = hash;
-    s_fetch.path      = path;
-    s_fetch.started_s = nowUnixS();
-    navSet(reuse ? "requesting" : "establishing");
-    info("%s %s:%s (req_id=%d%s)", packed ? "submit" : "go",
+    s.active    = true;
+    s.terminal  = false;
+    s.submit    = (packed != nullptr);
+    s.req_id    = rid;
+    s.hash      = hash;
+    s.path      = path;
+    s.started_s = nowUnixS();
+    navSet(sid, reuse ? "requesting" : "establishing");
+    info("s%d %s %s:%s (req_id=%d%s)", sid, packed ? "submit" : "go",
          hash.c_str(), path.c_str(), rid, reuse ? ", reused link" : "");
 }
 
-/* nomad.cmd.go = "<hash>[:<path>]". Empty path → /page/index.mu. */
+/* nomad.cmd.go = "[<sid>|]<hash>[:<path>]". Empty path → /page/index.mu. */
 static void onCmdGo(const char* key, const char* val)
 {
     if (!val || !*val) return;
     std::string cmd = val;
     storageUnset(key);
+    int sid = parseSid(cmd);
 
     std::string hash = cmd, path = NOMAD_DEFAULT_PAGE;
     size_t colon = cmd.find(':');
@@ -411,18 +509,23 @@ static void onCmdGo(const char* key, const char* val)
         path = cmd.substr(colon + 1);
         if (path.empty()) path = NOMAD_DEFAULT_PAGE;
     }
-    startFetch(hash, path, /*bypass_cache=*/false);
+    startFetch(sid, hash, path, /*bypass_cache=*/false);
 }
 
+/* nomad.cmd.reload = "[<sid>|]<unique>". */
 static void onCmdReload(const char* key, const char* val)
 {
     if (!val || !*val) return;
+    std::string cmd = val;
     storageUnset(key);
-    char hash[64] = {}, path[128] = {};
-    storageGetStr("nomad.nav.hash", hash, sizeof(hash), "");
-    storageGetStr("nomad.nav.path", path, sizeof(path), NOMAD_DEFAULT_PAGE);
-    if (!hash[0]) { warn("reload: nothing navigated yet"); return; }
-    startFetch(hash, path, /*bypass_cache=*/true);
+    int sid = parseSid(cmd);
+    char k[48], hash[64] = {}, path[128] = {};
+    sessKey(sid, "nav.hash", k, sizeof k);
+    storageGetStr(k, hash, sizeof(hash), "");
+    sessKey(sid, "nav.path", k, sizeof k);
+    storageGetStr(k, path, sizeof(path), NOMAD_DEFAULT_PAGE);
+    if (!hash[0]) { warn("s%d reload: nothing navigated yet", sid); return; }
+    startFetch(sid, hash, path, /*bypass_cache=*/true);
 }
 
 /* Form submit (Phase 4). The frontend stages the field values under
@@ -432,19 +535,24 @@ static void onCmdReload(const char* key, const char* val)
  * as the request envelope's 3rd element. */
 struct SubmitKV { std::string k, v; };
 static std::vector<SubmitKV>* s_submitKVs = nullptr;
+static size_t s_submitPfxLen = 0;       /* per-session prefix is dynamic */
 static void collectSubmitField(const char* key, const char* val)
 {
     if (!s_submitKVs || !key) return;
-    const char* tail = key + sizeof("nomad.submit.") - 1;
+    const char* tail = key + s_submitPfxLen;
     if (!*tail) return;
     s_submitKVs->push_back({ tail, val ? val : "" });
 }
 
+/* nomad.cmd.submit = "[<sid>|]<hash>:<path>"; fields are staged under the
+ * session's own tree, nomad.submit.<sid>.<field_*|var_*>, so parallel
+ * sessions can't read each other's staged forms. */
 static void onCmdSubmit(const char* key, const char* val)
 {
     if (!val || !*val) return;
     std::string cmd = val;
     storageUnset(key);
+    int sid = parseSid(cmd);
 
     std::string hash = cmd, path = NOMAD_DEFAULT_PAGE;
     size_t colon = cmd.find(':');
@@ -454,55 +562,112 @@ static void onCmdSubmit(const char* key, const char* val)
         if (path.empty()) path = NOMAD_DEFAULT_PAGE;
     }
 
+    char tree[24], pfx[32];
+    std::snprintf(tree, sizeof tree, "nomad.submit.%d", sid);
+    std::snprintf(pfx, sizeof pfx, "nomad.submit.%d.", sid);
     std::vector<SubmitKV> kvs;
     s_submitKVs = &kvs;
-    storageForEach("nomad.submit.", collectSubmitField);
+    s_submitPfxLen = std::strlen(pfx);
+    storageForEach(pfx, collectSubmitField);
     s_submitKVs = nullptr;
-    storageDeleteTree("nomad.submit");          /* consume the staged fields */
+    storageDeleteTree(tree);                    /* consume the staged fields */
 
     std::vector<uint8_t> packed;
     mpMapHeader(packed, kvs.size());
     for (auto& kv : kvs) { mpStr(packed, kv.k); mpStr(packed, kv.v); }
 
-    info("submit %s:%s (%zu fields)", hash.c_str(), path.c_str(), kvs.size());
-    startFetch(hash, path, /*bypass_cache=*/true, &packed);
+    info("s%d submit %s:%s (%zu fields)", sid, hash.c_str(), path.c_str(), kvs.size());
+    startFetch(sid, hash, path, /*bypass_cache=*/true, &packed);
 }
 
-/* ─────────────── bookmarks (s.nomad.bookmarks.<hex> = <name>|<note>) ─────────────── */
+/* ─────────────── bookmarks ───────────────
+ *
+ * s.nomad.bookmarks.<id> = "<hash>[:<path>]|<name>|<note>"
+ *
+ * Bookmarks address a host AND a path (page bookmarks, not just nodes), so
+ * the key is an opaque id (unix seconds, de-collided) — the url can't be a
+ * storage key (paths contain dots). The note is last and may contain '|';
+ * the url and name must not. Re-adding an existing url updates its
+ * name/note in place. */
+
+struct BmFind { std::string url; std::string id; };
+static BmFind* s_bmFind = nullptr;
+static void bmFindLeaf(const char* key, const char* val)
+{
+    if (!s_bmFind || !s_bmFind->id.empty() || !key || !val) return;
+    const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
+    if (std::strchr(tail, '.')) return;
+    std::string v = val;
+    size_t bar = v.find('|');
+    if (bar == std::string::npos) return;
+    if (v.substr(0, bar) == s_bmFind->url) s_bmFind->id = tail;
+}
+
+static std::string bookmarkIdForUrl(const std::string& url)
+{
+    BmFind f{ url, "" };
+    s_bmFind = &f;
+    storageForEach("s.nomad.bookmarks.", bmFindLeaf);
+    s_bmFind = nullptr;
+    return f.id;
+}
 
 static void onCmdBookmarkAdd(const char* key, const char* val)
 {
     if (!val || !*val) return;
     std::string cmd = val;
     storageUnset(key);
-    /* "<hash>|<name>|<note>" — note may contain '|' (it's last). */
+    /* "<hash>[:<path>]|<name>|<note>" — note may contain '|' (it's last). */
     size_t p1 = cmd.find('|');
-    if (p1 == std::string::npos) { warn("bookmark add: need <hash>|<name>[|<note>]"); return; }
-    std::string hash = cmd.substr(0, p1);
+    if (p1 == std::string::npos) { warn("bookmark add: need <hash>[:<path>]|<name>[|<note>]"); return; }
+    std::string url = cmd.substr(0, p1);
+    std::string hash = url.substr(0, url.find(':'));
     uint8_t dh[NOMAD_DEST_HASH_LEN];
     if (!hexToDestHash(hash, dh)) { warn("bookmark add: bad hash"); return; }
+    if (url.find(':') == std::string::npos)
+        url += ":" NOMAD_DEFAULT_PAGE;             /* bare host → index page */
     std::string rest = cmd.substr(p1 + 1);
     size_t p2 = rest.find('|');
     std::string name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
     std::string note = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
+
+    std::string id = bookmarkIdForUrl(url);        /* re-add = update in place */
+    if (id.empty()) {
+        char idb[16];
+        int t = nowUnixS();
+        for (;;) {
+            std::snprintf(idb, sizeof idb, "%d", t);
+            char probe[64];
+            std::snprintf(probe, sizeof probe, "s.nomad.bookmarks.%s", idb);
+            if (!storageExists(probe)) break;
+            t++;
+        }
+        id = idb;
+    }
     char k[64];
-    std::snprintf(k, sizeof(k), "s.nomad.bookmarks.%s", hash.c_str());
-    storageSet(k, (name + "|" + note).c_str());
-    info("bookmark + %s \"%s\"", hash.c_str(), sanitizeForLog(name).c_str());
+    std::snprintf(k, sizeof(k), "s.nomad.bookmarks.%s", id.c_str());
+    storageSet(k, (url + "|" + name + "|" + note).c_str());
+    info("bookmark + %s \"%s\"", url.c_str(), sanitizeForLog(name).c_str());
 }
 
+/* val = the bookmark id (key tail), or a "<hash>[:<path>]" url to match. */
 static void onCmdBookmarkDel(const char* key, const char* val)
 {
     if (!val || !*val) return;
-    std::string hash = val;
+    std::string v = val;
     storageUnset(key);
-    /* strip surrounding whitespace */
-    while (!hash.empty() && hash.back()  == ' ') hash.pop_back();
-    while (!hash.empty() && hash.front() == ' ') hash.erase(0, 1);
+    while (!v.empty() && v.back()  == ' ') v.pop_back();
+    while (!v.empty() && v.front() == ' ') v.erase(0, 1);
+    if (v.size() >= 32) {                          /* url form */
+        if (v.find(':') == std::string::npos) v += ":" NOMAD_DEFAULT_PAGE;
+        std::string id = bookmarkIdForUrl(v);
+        if (id.empty()) { warn("bookmark del: no match for %s", v.c_str()); return; }
+        v = id;
+    }
     char k[64];
-    std::snprintf(k, sizeof(k), "s.nomad.bookmarks.%s", hash.c_str());
+    std::snprintf(k, sizeof(k), "s.nomad.bookmarks.%s", v.c_str());
     storageUnset(k);
-    info("bookmark - %s", hash.c_str());
+    info("bookmark - %s", v.c_str());
 }
 
 /* ─────────────── announce-drift feed ─────────────── */
@@ -636,11 +801,15 @@ static void bookmarkListLeaf(const char* key, const char* val)
 {
     const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
     if (std::strchr(tail, '.')) return;
-    std::string name = val ? val : "";
-    size_t bar = name.find('|');
-    std::string note = (bar == std::string::npos) ? "" : name.substr(bar + 1);
-    if (bar != std::string::npos) name = name.substr(0, bar);
-    cliPrintf("%s  %s%s%s\n", tail, sanitizeForLog(name).c_str(),
+    /* "<hash>[:<path>]|<name>|<note>" */
+    std::string v = val ? val : "";
+    size_t p1 = v.find('|');
+    std::string url  = (p1 == std::string::npos) ? v : v.substr(0, p1);
+    std::string rest = (p1 == std::string::npos) ? "" : v.substr(p1 + 1);
+    size_t p2 = rest.find('|');
+    std::string name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
+    std::string note = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
+    cliPrintf("%-10s  %s  %s%s%s\n", tail, url.c_str(), sanitizeForLog(name).c_str(),
               note.empty() ? "" : "  — ", sanitizeForLog(note).c_str());
 }
 
@@ -649,12 +818,13 @@ static void cliNomad(const char* args)
     if (args && strcmp(args, "help") == 0) { cliPrintf("%-*s NomadNet browser: nodes, go, bookmarks\n", CLI_HELP_COL, "nomad [...]"); return; }
     if (args && cliWantsHelp(args)) {
         cliPrintf("nomad nodes                     heard nodes (announce drift)\n");
-        cliPrintf("nomad go <hash>[:<path>]        fetch a page (default %s)\n", NOMAD_DEFAULT_PAGE);
-        cliPrintf("nomad reload                    re-fetch current (bypass cache)\n");
-        cliPrintf("nomad bookmarks                 list bookmarks\n");
-        cliPrintf("nomad bookmark add <hash> <name>[ <note>]\n");
-        cliPrintf("nomad bookmark del <hash>\n");
-        cliPrintf("page bytes are logged on fetch; nav state in nomad.nav.*\n");
+        cliPrintf("nomad go [<sid>|]<hash>[:<path>]  fetch a page (default %s)\n", NOMAD_DEFAULT_PAGE);
+        cliPrintf("nomad reload                    re-fetch session 0 (bypass cache)\n");
+        cliPrintf("nomad bookmarks                 list bookmarks (first column = id)\n");
+        cliPrintf("nomad bookmark add <hash>[:<path>] <name>[ <note>]\n");
+        cliPrintf("nomad bookmark del <id | hash[:<path>]>\n");
+        cliPrintf("sessions: 0-5 web tabs, 6 LCD; bare go/reload = session 0\n");
+        cliPrintf("page bytes are logged on fetch; nav state in nomad.s<sid>.nav.*\n");
         return;
     }
     /* Bare `nomad` → heard-nodes list as status. */
@@ -679,7 +849,9 @@ static void cliNomad(const char* args)
         return;
     }
     if (strcmp(args, "reload") == 0) {
-        storageSet("nomad.cmd.reload", "1");
+        char v[16];   /* unique per invocation — see the sentinel note up top */
+        snprintf(v, sizeof v, "%u", (unsigned)xTaskGetTickCount());
+        storageSet("nomad.cmd.reload", v);
         cliPrintf("nomad reload: queued\n");
         return;
     }
@@ -737,17 +909,18 @@ static void nomadTaskMain(void*)
     itsServerPortOpen(NOMAD_RESP_PORT, /*packetBased=*/false,
                       /*maxHandles=*/1, /*toSize=*/0, /*fromSize=*/0);
     itsOnAux(NOMAD_RESP_PORT, onNomadAux);
-    /* announce-fanout sub + the (reused) link, with generous headroom so a
-     * transient lingering conn never blocks a fetch. */
-    itsClientInit(8);
+    /* announce-fanout sub + up to NOMAD_SESSIONS parallel links, with
+     * headroom so a transient lingering conn never blocks a fetch. */
+    itsClientInit(NOMAD_SESSIONS + 5);
 
     storageSubscribeChanges("nomad.cmd.go",            onCmdGo);
     storageSubscribeChanges("nomad.cmd.reload",        onCmdReload);
     storageSubscribeChanges("nomad.cmd.submit",        onCmdSubmit);
     storageSubscribeChanges("nomad.cmd.bookmark.add",  onCmdBookmarkAdd);
     storageSubscribeChanges("nomad.cmd.bookmark.del",  onCmdBookmarkDel);
-    /* Reflect rnsd's per-fetch Link progress into nomad.nav.status. */
-    storageSubscribeChanges("rnsd.links." NOMAD_FETCH_TAG ".state", onLinkState);
+    /* Reflect each session Link's progress into its nav.status (prefix sub
+     * over all rnsd.links.nomad<sid>.* trees; the handler filters .state). */
+    storageSubscribeChanges("rnsd.links." NOMAD_FETCH_TAG, onLinkState);
 
     /* Gate first contact with rnsd on a known-valid clock (or the bounded
      * wait), like lxmf and the transports. rnsd itself only stands up its ITS
@@ -757,8 +930,10 @@ static void nomadTaskMain(void*)
     waitForTime(0);
 
     connectAnnounceSub();
-    s_fetch.handle = -1;   /* 0 is a valid ITS handle; start unset */
-    navSet("idle");
+    for (int i = 0; i < NOMAD_SESSIONS; i++) {
+        s_sess[i].handle = -1;   /* 0 is a valid ITS handle; start unset */
+        navSet(i, "idle");
+    }
 
     s_lastPublishTick = xTaskGetTickCount();
 
