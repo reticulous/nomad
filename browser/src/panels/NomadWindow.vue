@@ -1,13 +1,14 @@
 <!-- Nomad Browser menu (the main browser window). A tabbed Nomad Network
      page browser: a collapsible sidebar (search, bookmarks, on-the-mesh), a
-     tab strip (up to 5 pages loaded at once), an address bar, and a Micron
+     tab strip (up to 6 pages loaded at once), an address bar, and a Micron
      page view. Each tab is an independent mini-browser with its own
-     Back/forward history. The firmware holds one page at a time, so only the
-     active tab is "live": a watcher snapshots firmware nav/page results into
-     it. Switching to an already-loaded tab just foregrounds its cache (no
-     refetch). Sidebar / address-bar opens go to a new tab (or foreground the
-     tab that already holds that URL); in-page links stay in the current tab
-     unless Ctrl/Cmd-clicked. -->
+     Back/forward history AND its own firmware browser session (nomad.s<sid>,
+     sid 0-5) — tabs fetch in parallel, each over its own Link; a per-session
+     watcher mirrors firmware nav/page state into its tab whether or not the
+     tab is foreground. Switching tabs just changes which one you look at.
+     Sidebar / address-bar opens go to a new tab (or foreground the tab that
+     already holds that URL); in-page links stay in the current tab unless
+     Ctrl/Cmd-clicked. -->
 <template>
   <FloatingWindow
     id="nomad"
@@ -26,14 +27,6 @@
       <div class="nomad" :style="{ '--rfs': scale }">
         <!-- tab strip -->
         <div class="tabstrip">
-          <button class="icon-btn side-toggle"
-                  :title="sideOpen ? 'Hide sidebar' : 'Show sidebar'"
-                  @click="toggleSide">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-            </svg>
-          </button>
           <div class="tabs">
             <div
               v-for="t in tabs" :key="t.id"
@@ -48,10 +41,19 @@
                   title="New tab" @click="newTab">+</button>
         </div>
 
-        <!-- address bar -->
+        <!-- address bar: ☰ ⟳ ‹ — the same three buttons, same order, as the
+             LCD browser's header -->
         <div class="bar">
-          <button class="nav glyph" :disabled="!canBack" title="Back" @click="back"><span class="g">‹</span></button>
+          <button class="nav burger"
+                  :title="sideOpen ? 'Hide site list' : 'Show site list'"
+                  @click="toggleSide">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
           <button class="nav glyph" title="Reload" :disabled="!curHash" @click="reload"><span class="g">⟳</span></button>
+          <button class="nav glyph" :disabled="!canBack" title="Back" @click="back"><span class="g">‹</span></button>
           <input
             v-model="address"
             class="addr mono"
@@ -70,7 +72,7 @@
 
         <div class="body">
           <!-- sidebar (collapsible) -->
-          <div v-if="sideOpen" class="side">
+          <div v-if="sideOpen" class="side" @scroll.passive="onSideScroll">
             <input
               v-model="sideQ" class="side-search"
               placeholder="Search nodes" autocomplete="off"
@@ -80,12 +82,13 @@
             <div class="side-h">Bookmarks</div>
             <div v-if="filteredBookmarks.length === 0" class="side-empty">{{ sideQ.trim() ? 'no matches' : 'none' }}</div>
             <div
-              v-for="b in filteredBookmarks" :key="b.hash"
+              v-for="b in filteredBookmarks" :key="b.id"
               class="item" :class="{ active: b.hash === curHash }"
-              :title="b.hash" @click="openUrl(b.hash, DEFAULT_PAGE)"
+              :title="`${b.hash}:${b.path}`" @click="openUrl(b.hash, b.path)"
             >
               <div class="item-name">{{ b.name || shortHash(b.hash) }}</div>
-              <div v-if="b.note" class="item-sub">{{ b.note }}</div>
+              <!-- always present (nbsp when blank) so bookmark cells are equal height -->
+              <div class="item-sub">{{ bookmarkSub(b) || ' ' }}</div>
             </div>
 
             <div class="side-h">On the Mesh</div>
@@ -100,9 +103,10 @@
             </div>
           </div>
 
-          <!-- page view -->
+          <!-- page view; the status line hovers top-right, auto-hiding 2 s
+               after load and reappearing on scroll -->
           <div class="view">
-            <div class="status" :class="statusClass">
+            <div v-show="statusVisible" class="status" :class="statusClass">
               <span class="dot" /><span class="status-text">{{ statusText }}</span>
               <button
                 v-if="activeTab && activeTab.body"
@@ -120,8 +124,8 @@
             <div v-else-if="!activeTab || !activeTab.body" class="page-msg dim">
               Pick a bookmark or node, or enter an address above.
             </div>
-            <pre v-else-if="viewSource" class="page source">{{ activeTab.body }}</pre>
-            <div v-else ref="pageEl" class="page" v-html="pageHtml" @click="onPageClick" />
+            <pre v-else-if="viewSource" class="page source" @scroll.passive="pokeStatus">{{ activeTab.body }}</pre>
+            <div v-else ref="pageEl" class="page" v-html="pageHtml" @click="onPageClick" @scroll.passive="pokeStatus" />
           </div>
         </div>
       </div>
@@ -132,7 +136,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import FloatingWindow from 'spangap-browser/components/FloatingWindow.vue'
-import { useNomad, DEFAULT_PAGE, type NavStatus } from '../modules/nomad'
+import { useNomad, DEFAULT_PAGE, WEB_SESSIONS, type NavStatus, type NomadNode, type Bookmark } from '../modules/nomad'
 import { micronToHtml } from '../lib/micron'
 import { useWinZoom } from 'rns/lib/winZoom'
 
@@ -143,17 +147,20 @@ const emit = defineEmits<{ 'update:visible': [value: boolean] }>()
 
 const defaultGeom = { x: 14, y: 8, w: 70, h: 80 }
 const HASH_RE = /^[0-9a-fA-F]{32}$/
-const MAX_TABS = 5
+const MAX_TABS = WEB_SESSIONS   /* one firmware session per tab */
 
 const nomad = useNomad()
 
 /* ── Tabs ──
- * A tab is an independent mini-browser: its own {hash,path}, its own
- * Back/forward history, and a cached snapshot of the last firmware page for
- * its URL. `title` holds a received page title when one exists; otherwise the
- * tab is named after the node's human-readable name (see tabTitle). */
+ * A tab is an independent mini-browser bound to one firmware session (sid):
+ * its own {hash,path}, Back/forward history, and a live mirror of that
+ * session's nav/page state (see the per-session watchers below) — so a
+ * background tab keeps loading while you look at another. `title` holds a
+ * received page title when one exists; otherwise the tab is named after the
+ * node's human-readable name (see tabTitle). */
 interface Tab {
   id: number
+  sid: number
   hash: string
   path: string
   title: string
@@ -167,16 +174,26 @@ interface Tab {
 }
 
 let tabSeq = 0
-function blankTab(): Tab {
+function makeTab(sid: number): Tab {
   return {
-    id: ++tabSeq, hash: '', path: '', title: '',
+    id: ++tabSeq, sid, hash: '', path: '', title: '',
     history: [], histPos: -1,
     body: '', size: 0, truncated: false, status: 'idle', error: '',
   }
 }
 
-const tabs = reactive<Tab[]>([blankTab()])
+const tabs = reactive<Tab[]>([makeTab(0)])
 const activeTabId = ref<number>(tabs[0]!.id)
+
+/* Lowest firmware session not bound to a tab; -1 when all are in use. */
+function freeSid(): number {
+  for (let s = 0; s < MAX_TABS; s++) if (!tabs.some(t => t.sid === s)) return s
+  return -1
+}
+function blankTab(): Tab | null {
+  const sid = freeSid()
+  return sid < 0 ? null : makeTab(sid)
+}
 const activeTab = computed<Tab | undefined>(() => tabs.find(t => t.id === activeTabId.value))
 
 const pageEl = ref<HTMLElement | null>(null)
@@ -201,16 +218,60 @@ const filteredBookmarks = computed(() => {
   return nomad.bookmarks.value.filter(b =>
     b.name.toLowerCase().includes(needle) || b.hash.toLowerCase().includes(needle))
 })
+
+/* Bookmark sub line: the note plus when the node was last heard on the
+ * mesh (blank until an announce arrives). */
+function nodeSeen(hash: string): string {
+  const n = nomad.nodes.value.find(nd => nd.hash === hash)
+  return n ? `${n.hops} hops · ${age(n.lastSeen)}` : ''
+}
+function bookmarkSub(b: Bookmark): string {
+  const seen = nodeSeen(b.hash)
+  if (!b.note) return seen
+  return seen ? `${b.note} · ${seen}` : b.note
+}
+
+/* "On the Mesh": bookmarked nodes live in the section above (not repeated
+ * here), and the ORDER is held still while the operator is using the
+ * sidebar — announce churn within SIDE_HOLD_MS of the last scroll updates
+ * rows in place and appends newcomers at the end instead of re-sorting
+ * the list under the pointer. */
+const SIDE_HOLD_MS = 10000
+const sideScrollTs = ref(0)
+function onSideScroll() { sideScrollTs.value = Date.now() }
+
+const bookmarkedHashes = computed(() => new Set(nomad.bookmarks.value.map(b => b.hash)))
+const meshNodes = computed(() =>
+  nomad.nodes.value.filter(n => !bookmarkedHashes.value.has(n.hash)))
+
+const orderedNodes = ref<NomadNode[]>([])
+watch(meshNodes, nodes => {
+  if (Date.now() - sideScrollTs.value >= SIDE_HOLD_MS) {
+    orderedNodes.value = nodes                  /* already newest-first */
+    return
+  }
+  const byHash = new Map(nodes.map(n => [n.hash, n]))
+  const next: NomadNode[] = []
+  for (const o of orderedNodes.value) {
+    const n = byHash.get(o.hash)
+    if (n) { next.push(n); byHash.delete(o.hash) }
+  }
+  for (const n of byHash.values()) next.push(n)  /* newcomers at the end */
+  orderedNodes.value = next
+}, { immediate: true })
+
 const filteredNodes = computed(() => {
   const needle = sideQ.value.trim().toLowerCase()
-  if (!needle) return nomad.nodes.value
-  return nomad.nodes.value.filter(n =>
+  if (!needle) return orderedNodes.value
+  return orderedNodes.value.filter(n =>
     n.name.toLowerCase().includes(needle) || n.hash.toLowerCase().includes(needle))
 })
 
 /* ── Derived from the active tab ── */
 const curHash = computed(() => activeTab.value?.hash ?? '')
-const curBookmarked = computed(() => !!curHash.value && nomad.isBookmarked(curHash.value))
+const curPath = computed(() => activeTab.value?.path || DEFAULT_PAGE)
+const curBookmarked = computed(() =>
+  !!curHash.value && nomad.isBookmarked(curHash.value, curPath.value))
 const pageHtml = computed(() => micronToHtml(activeTab.value?.body ?? ''))
 const canBack = computed(() => (activeTab.value?.histPos ?? -1) > 0)
 
@@ -237,6 +298,19 @@ const showError = computed(() => {
   const t = activeTab.value
   return !!t && (t.status === 'failed' || t.status === 'timeout') && !t.body
 })
+
+/* Status hover lifecycle: visible while loading/failed; once the page is
+ * loaded it lingers 2 s and hides; scrolling the page brings it back for
+ * another 2 s. */
+const statusVisible = ref(true)
+let statusHideTimer: ReturnType<typeof setTimeout> | null = null
+function pokeStatus() {
+  statusVisible.value = true
+  if (statusHideTimer) { clearTimeout(statusHideTimer); statusHideTimer = null }
+  if (activeTab.value?.status === 'done')
+    statusHideTimer = setTimeout(() => { statusVisible.value = false }, 2000)
+}
+watch(() => [activeTabId.value, activeTab.value?.status], pokeStatus)
 
 function shortHash(h: string): string { return h.slice(0, 8) + '…' }
 
@@ -268,13 +342,13 @@ function syncAddress() {
   address.value = t && t.hash ? `${t.hash}:${t.path || DEFAULT_PAGE}` : ''
 }
 
-/* Drive the firmware to (re)fetch the active tab's URL. */
+/* Drive the firmware to (re)fetch the active tab's URL on its session. */
 function fetchActive() {
   const t = activeTab.value
   if (!t || !HASH_RE.test(t.hash)) return
   t.status = 'path_requested'
   t.error = ''
-  nomad.go(t.hash, t.path)
+  nomad.go(t.sid, t.hash, t.path)
 }
 
 function activateTab(id: number) {
@@ -303,12 +377,11 @@ function openUrl(hash: string, path: string) {
   const cur = activeTab.value
   if (cur && !cur.hash) { loadInto(cur, h, p); fetchActive(); syncAddress(); return }
 
-  if (tabs.length >= MAX_TABS) {
+  const nt = tabs.length < MAX_TABS ? blankTab() : null
+  if (!nt) {                       /* at the cap: replace the active tab */
     if (!cur) return
     loadInto(cur, h, p); fetchActive(); syncAddress(); return
   }
-
-  const nt = blankTab()
   loadInto(nt, h, p)
   tabs.push(nt)
   activeTabId.value = nt.id
@@ -341,12 +414,23 @@ function back() {
 }
 
 function reload() {
-  if (activeTab.value?.hash) fetchActive()
+  const t = activeTab.value
+  if (!t?.hash) return
+  /* A true reload, not a re-`go`: the firmware bypasses the cache read but
+   * keeps the cached copy until fresh bytes replace it — so mark the current
+   * page in history first; Back returns to the cached copy if the reload
+   * can't connect. */
+  t.history = t.history.slice(0, t.histPos + 1)
+  t.history.push({ hash: t.hash, path: t.path })
+  t.histPos = t.history.length - 1
+  t.status = 'path_requested'
+  t.error = ''
+  nomad.reload(t.sid)
 }
 
 function newTab() {
-  if (tabs.length >= MAX_TABS) return
   const nt = blankTab()
+  if (!nt) return
   tabs.push(nt)
   activeTabId.value = nt.id
   syncAddress()
@@ -358,7 +442,9 @@ function closeTab(id: number) {
   const wasActive = tabs[idx]!.id === activeTabId.value
   tabs.splice(idx, 1)
   if (tabs.length === 0) {
-    const nt = blankTab(); tabs.push(nt); activeTabId.value = nt.id; syncAddress(); return
+    const nt = blankTab()
+    if (nt) { tabs.push(nt); activeTabId.value = nt.id }
+    syncAddress(); return
   }
   if (wasActive) {
     activeTabId.value = tabs[Math.min(idx, tabs.length - 1)]!.id
@@ -452,7 +538,7 @@ function followTarget(target: string, newTabReq: boolean) {
     t.body = ''; t.size = 0; t.truncated = false
   }
   t.status = 'path_requested'; t.error = ''
-  nomad.submit(r.hash, r.path, data)
+  nomad.submit(t.sid, r.hash, r.path, data)
   syncAddress()
 }
 
@@ -474,34 +560,41 @@ function onPageClick(ev: MouseEvent) {
 
 function toggleBookmark() {
   if (!curHash.value) return
-  if (curBookmarked.value) nomad.delBookmark(curHash.value)
-  else {
+  if (curBookmarked.value) {
+    const bm = nomad.bookmarks.value.find(
+      b => b.hash === curHash.value && b.path === curPath.value)
+    if (bm) nomad.delBookmark(bm.id)
+  } else {
     const node = nomad.nodes.value.find(n => n.hash === curHash.value)
-    nomad.addBookmark(curHash.value, node?.name ?? '', '')
+    nomad.addBookmark(curHash.value, curPath.value, node?.name ?? '', '')
   }
 }
 
-/* Live mirror: the firmware holds one page, so copy its nav/page state into
- * the active tab whenever it pertains to that tab's hash. Other tabs keep
- * their cached snapshots until re-activated and re-navigated. */
-watch(
-  () => [nomad.navStatus.value, nomad.navHash.value, nomad.navPath.value,
-         nomad.page.value.hash, nomad.page.value.body, nomad.page.value.size,
-         nomad.page.value.truncated, nomad.navError.value],
-  () => {
-    const t = activeTab.value
-    if (!t || !t.hash || nomad.navHash.value !== t.hash) return
-    t.status = nomad.navStatus.value
-    t.error = nomad.navError.value
-    if (nomad.navPath.value) t.path = nomad.navPath.value
-    if (nomad.page.value.hash === t.hash) {
-      t.body = nomad.page.value.body
-      t.size = nomad.page.value.size
-      t.truncated = nomad.page.value.truncated
-    }
-    syncAddress()
-  },
-)
+/* Live mirror, one watcher per firmware session: copy the session's
+ * nav/page state into whichever tab owns that sid — foreground or not, so
+ * parallel fetches land in their tabs as they complete. The hash guard
+ * drops stale results when the tab has since navigated elsewhere. */
+for (let sid = 0; sid < MAX_TABS; sid++) {
+  const sess = nomad.session(sid)
+  watch(
+    () => [sess.navStatus.value, sess.navHash.value, sess.navPath.value,
+           sess.page.value.hash, sess.page.value.body, sess.page.value.size,
+           sess.page.value.truncated, sess.navError.value],
+    () => {
+      const t = tabs.find(tb => tb.sid === sid)
+      if (!t || !t.hash || sess.navHash.value !== t.hash) return
+      t.status = sess.navStatus.value
+      t.error = sess.navError.value
+      if (sess.navPath.value) t.path = sess.navPath.value
+      if (sess.page.value.hash === t.hash) {
+        t.body = sess.page.value.body
+        t.size = sess.page.value.size
+        t.truncated = sess.page.value.truncated
+      }
+      if (t.id === activeTabId.value) syncAddress()
+    },
+  )
+}
 </script>
 
 <style scoped>
@@ -520,7 +613,6 @@ watch(
 }
 .icon-btn:hover:not(:disabled) { background: #353535; }
 .icon-btn:disabled { opacity: 0.4; cursor: default; }
-.side-toggle { align-self: center; height: 24px; }
 .tab-new { align-self: center; height: 24px; font-weight: 700; }
 .tabs { display: flex; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; }
 .tab {
@@ -553,8 +645,10 @@ watch(
 .nav:disabled { opacity: 0.4; cursor: default; }
 /* back ‹ and reload ⟳ glyphs were tiny — bump to 250%; Go/star to 125% */
 .nav.glyph { font-size: 35px; line-height: 1; padding: 0 12px; }
-/* both glyphs sit optically low in their box — raise by 30% of char height */
-.nav.glyph .g { display: inline-block; transform: translateY(-30%); }
+/* both glyphs sit optically low in their box — raise by 15% of char height */
+.nav.glyph .g { display: inline-block; transform: translateY(-15%); }
+/* the ☰ site-list toggle, leftmost in the bar (matches the LCD header) */
+.nav.burger { display: flex; align-items: center; justify-content: center; padding: 0 10px; }
 .nav.go { font-size: 17.5px; }
 .nav.star { font-size: 17.5px; }
 .nav.star.on { color: #ffd24a; border-color: rgba(255,210,74,0.4); }
@@ -589,20 +683,25 @@ watch(
   color: #e0e0e0; font-size: calc(13px * var(--rfs, 1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .item-sub { color: #888; font-size: calc(11px * var(--rfs, 1)); }
-.view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.view { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+/* Floating status chip: top-right over the page, black on #ffc, 2px
+ * margin + padding; v-show'd by the hover lifecycle (pokeStatus). */
 .status {
-  display: flex; align-items: center; gap: 6px; font-size: calc(12px * var(--rfs, 1)); color: #aaa;
-  padding: 5px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); background: #1a1a1a;
+  position: absolute; top: 2px; right: 2px; z-index: 5;
+  display: flex; align-items: center; gap: 6px;
+  font-size: calc(12px * var(--rfs, 1)); color: #000;
+  padding: 2px; background: #ffc; border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.4);
 }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
 .status .status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* view source / view page toggle, pushed to the right edge of the status line */
 .src-toggle {
-  margin-left: auto; flex: none; background: #2a2a2a; border: 1px solid rgba(255,255,255,0.15);
-  color: #cdd6df; border-radius: 4px; padding: 1px 8px; cursor: pointer;
+  margin-left: 6px; flex: none; background: rgba(0,0,0,0.08); border: 1px solid rgba(0,0,0,0.25);
+  color: #222; border-radius: 4px; padding: 1px 8px; cursor: pointer;
   font-size: calc(11px * var(--rfs, 1)); font-family: inherit;
 }
-.src-toggle:hover { background: #353535; color: #fff; }
+.src-toggle:hover { background: rgba(0,0,0,0.16); color: #000; }
 /* raw Micron source view */
 .page.source {
   margin: 0; white-space: pre-wrap; word-break: break-word;

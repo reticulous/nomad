@@ -25,17 +25,17 @@
     <div v-if="nomad.bookmarks.value.length === 0" class="none">
       No bookmarks yet. Bookmark a node from the browser window, or add one below.
     </div>
-    <div v-for="b in nomad.bookmarks.value" :key="b.hash" class="bm">
+    <div v-for="b in nomad.bookmarks.value" :key="b.id" class="bm">
       <div class="bm-info">
         <div class="bm-name">{{ b.name || '(unnamed)' }}</div>
-        <div class="bm-hash">{{ b.hash }}</div>
+        <div class="bm-hash">{{ b.hash }}:{{ b.path }}</div>
         <div v-if="b.note" class="bm-note">{{ b.note }}</div>
       </div>
-      <button class="del" @click="nomad.delBookmark(b.hash)">Remove</button>
+      <button class="del" @click="nomad.delBookmark(b.id)">Remove</button>
     </div>
 
     <div class="add">
-      <input v-model="addHash" class="in mono" placeholder="32-hex destination hash" maxlength="32" />
+      <input v-model="addHash" class="in mono" placeholder="32-hex hash[:/page/index.mu]" />
       <input v-model="addName" class="in" placeholder="name (optional)" />
       <input v-model="addNote" class="in" placeholder="note (optional)" />
       <button class="add-btn" :disabled="!validHash" @click="add">Add bookmark</button>
@@ -53,11 +53,14 @@ const addHash = ref('')
 const addName = ref('')
 const addNote = ref('')
 
-const validHash = computed(() => /^[0-9a-fA-F]{32}$/.test(addHash.value.trim()))
+const validHash = computed(() => /^[0-9a-fA-F]{32}(:.*)?$/.test(addHash.value.trim()))
 
 function add() {
   if (!validHash.value) return
-  nomad.addBookmark(addHash.value.trim().toLowerCase(), addName.value.trim(), addNote.value.trim())
+  const v = addHash.value.trim()
+  const hash = v.slice(0, 32).toLowerCase()
+  const path = v.length > 33 && v[32] === ':' ? v.slice(33) : ''
+  nomad.addBookmark(hash, path, addName.value.trim(), addNote.value.trim())
   addHash.value = ''; addName.value = ''; addNote.value = ''
 }
 

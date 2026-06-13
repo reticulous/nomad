@@ -5,11 +5,17 @@
  *   reads  = computed() over the reactive device mirror
  *   writes = cmd sentinels via device.sendJson()
  *
+ * Browsing is SESSION-based: the firmware runs NOMAD_SESSIONS parallel
+ * browser contexts, each with its own Link + nav/page state. The web UI
+ * owns sessions 0..WEB_SESSIONS-1 (one per tab); the LCD owns session 6.
+ *
  *   nomad.nodes.<hex>        "<last_s>|<hops>|<name>"   announce drift
- *   s.nomad.bookmarks.<hex>  "<name>|<note>"            persistent
- *   nomad.nav.{status,hash,path,error}                  navigation state
- *   nomad.page.{hash,path,size,body,truncated,fetched_s} last page (body capped)
- *   cmd: nomad.cmd.go=<hash>[:<path>] / .reload / .bookmark.add / .bookmark.del
+ *   s.nomad.bookmarks.<id>   "<hash>[:<path>]|<name>|<note>"  persistent
+ *   nomad.s<sid>.nav.{status,hash,path,error}           session nav state
+ *   nomad.s<sid>.page.{hash,path,size,body,truncated,fetched_s}
+ *   cmd: nomad.cmd.go=<sid>|<hash>[:<path>] / .reload=<sid>|<unique>
+ *        / .submit=<sid>|<hash>:<path> (fields under nomad.submit.<sid>.*)
+ *        / .bookmark.add / .bookmark.del
  */
 import { ref, computed, type ComputedRef } from 'vue'
 import { useDeviceStore } from 'spangap-browser/stores/device'
@@ -28,6 +34,10 @@ export function showNomad() { nomadVisible.value = true; nomadFocus.value++ }
 
 export const DEFAULT_PAGE = '/page/index.mu'
 
+/** Parallel firmware browser sessions owned by the web UI (tab ↔ session).
+ *  Sessions 0..WEB_SESSIONS-1 are ours; session 6 is the LCD browser's. */
+export const WEB_SESSIONS = 6
+
 export interface NomadNode {
   hash: string
   name: string
@@ -36,7 +46,9 @@ export interface NomadNode {
 }
 
 export interface Bookmark {
+  id: string      /* opaque storage key tail — delete by this */
   hash: string
+  path: string
   name: string
   note: string
 }
@@ -65,25 +77,30 @@ function nest(path: string, val: any): Patch {
   return root
 }
 
-export interface UseNomad {
-  nodes: ComputedRef<NomadNode[]>
-  bookmarks: ComputedRef<Bookmark[]>
+/** Live view over one firmware browser session (nomad.s<sid>.*). */
+export interface NomadSession {
   page: ComputedRef<NomadPage>
   navStatus: ComputedRef<NavStatus>
   navHash: ComputedRef<string>
   navPath: ComputedRef<string>
   navError: ComputedRef<string>
   busy: ComputedRef<boolean>
-  go: (hash: string, path?: string) => void
-  goUrl: (url: string) => void
-  reload: () => void
-  /** Submit a form. `data` keys are already the NomadNet map keys
-   *  (`field_<name>` / `var_<name>`); staged under nomad.submit.* then
-   *  triggered with nomad.cmd.submit. */
-  submit: (hash: string, path: string, data: Record<string, string>) => void
-  isBookmarked: (hash: string) => boolean
-  addBookmark: (hash: string, name?: string, note?: string) => void
-  delBookmark: (hash: string) => void
+}
+
+export interface UseNomad {
+  nodes: ComputedRef<NomadNode[]>
+  bookmarks: ComputedRef<Bookmark[]>
+  /** Per-session live state; sid 0..WEB_SESSIONS-1. Cached per sid. */
+  session: (sid: number) => NomadSession
+  go: (sid: number, hash: string, path?: string) => void
+  reload: (sid: number) => void
+  /** Submit a form on a session. `data` keys are already the NomadNet map
+   *  keys (`field_<name>` / `var_<name>`); staged under nomad.submit.<sid>.*
+   *  then triggered with nomad.cmd.submit. */
+  submit: (sid: number, hash: string, path: string, data: Record<string, string>) => void
+  isBookmarked: (hash: string, path?: string) => boolean
+  addBookmark: (hash: string, path?: string, name?: string, note?: string) => void
+  delBookmark: (idOrUrl: string) => void
   /** Open an LXMF conversation for an lxmf@<hash> address tapped in a page
    *  (writes the shared `lxmf.url_web` var; LXMF reacts). */
   openLxmf: (hash: string) => void
@@ -116,90 +133,101 @@ export function useNomad(): UseNomad {
   const bookmarks = computed<Bookmark[]>(() => {
     const tree = device.get('s.nomad.bookmarks') ?? {}
     const out: Bookmark[] = []
-    for (const [hash, raw] of Object.entries(tree)) {
+    for (const [id, raw] of Object.entries(tree)) {
       if (typeof raw !== 'string') continue
-      const bar = raw.indexOf('|')
+      // "<hash>[:<path>]|<name>|<note>" — note last (may contain '|')
+      const p1 = raw.indexOf('|')
+      if (p1 < 0) continue
+      const url = raw.slice(0, p1)
+      const colon = url.indexOf(':')
+      const hash = colon >= 0 ? url.slice(0, colon) : url
+      const path = colon >= 0 ? url.slice(colon + 1) : DEFAULT_PAGE
+      if (!HASH_RE.test(hash)) continue
+      const rest = raw.slice(p1 + 1)
+      const p2 = rest.indexOf('|')
       out.push({
-        hash,
-        name: bar >= 0 ? raw.slice(0, bar) : raw,
-        note: bar >= 0 ? raw.slice(bar + 1) : '',
+        id, hash, path,
+        name: p2 >= 0 ? rest.slice(0, p2) : rest,
+        note: p2 >= 0 ? rest.slice(p2 + 1) : '',
       })
     }
     return out.sort((a, b) => (a.name || a.hash).localeCompare(b.name || b.hash))
   })
 
-  const page = computed<NomadPage>(() => {
-    const p = device.get('nomad.page') ?? {}
-    return {
-      hash: String(p.hash ?? ''),
-      path: String(p.path ?? ''),
-      size: Number(p.size ?? 0),
-      body: typeof p.body === 'string' ? p.body : '',
-      truncated: Number(p.truncated ?? 0) !== 0,
-      fetchedS: Number(p.fetched_s ?? 0),
-    }
-  })
+  /* Per-session live views, built lazily and cached (computed identity per
+   * sid keeps watchers stable across callers). */
+  const sessions = new Map<number, NomadSession>()
+  const session = (sid: number): NomadSession => {
+    let s = sessions.get(sid)
+    if (s) return s
+    const base = `nomad.s${sid}`
+    const page = computed<NomadPage>(() => {
+      const p = device.get(`${base}.page`) ?? {}
+      return {
+        hash: String(p.hash ?? ''),
+        path: String(p.path ?? ''),
+        size: Number(p.size ?? 0),
+        body: typeof p.body === 'string' ? p.body : '',
+        truncated: Number(p.truncated ?? 0) !== 0,
+        fetchedS: Number(p.fetched_s ?? 0),
+      }
+    })
+    const navStatus = computed<NavStatus>(() =>
+      (device.get(`${base}.nav.status`) as NavStatus) ?? 'idle')
+    const navHash = computed(() => String(device.get(`${base}.nav.hash`) ?? ''))
+    const navPath = computed(() => String(device.get(`${base}.nav.path`) ?? ''))
+    const navError = computed(() => String(device.get(`${base}.nav.error`) ?? ''))
+    const busy = computed(() =>
+      ['path_requested', 'establishing', 'requesting'].includes(navStatus.value))
+    s = { page, navStatus, navHash, navPath, navError, busy }
+    sessions.set(sid, s)
+    return s
+  }
 
-  const navStatus = computed<NavStatus>(() =>
-    (device.get('nomad.nav.status') as NavStatus) ?? 'idle')
-  const navHash = computed(() => String(device.get('nomad.nav.hash') ?? ''))
-  const navPath = computed(() => String(device.get('nomad.nav.path') ?? ''))
-  const navError = computed(() => String(device.get('nomad.nav.error') ?? ''))
-  const busy = computed(() =>
-    ['path_requested', 'establishing', 'requesting'].includes(navStatus.value))
-
-  const go = (hash: string, path?: string) => {
+  const go = (sid: number, hash: string, path?: string) => {
     const h = hash.trim().toLowerCase()
     if (!HASH_RE.test(h)) return
     const p = (path ?? '').trim()
-    device.sendJson(nest('nomad.cmd.go', p ? `${h}:${p}` : h))
+    device.sendJson(nest('nomad.cmd.go', `${sid}|${p ? `${h}:${p}` : h}`))
   }
 
-  /* Resolve a Micron link target against the current node, then navigate.
-   *  Grammar (docs/nomad.md): "<hash>:<path>" | ":<path>" (current node) |
-   *  "<path>" (current node). @-prefixed / rrc:// schemes are out of scope
-   *  for v1 — ignored so the link doesn't misfire. */
-  const goUrl = (url: string) => {
-    const u = url.trim()
-    if (!u) return
-    if (/^[a-z]+@/.test(u) || u.includes('://')) return    // lxmf@ / rrc:// — defer
-    const colon = u.indexOf(':')
-    if (colon === 32 && HASH_RE.test(u.slice(0, 32))) {
-      go(u.slice(0, 32), u.slice(colon + 1) || DEFAULT_PAGE)
-      return
-    }
-    if (HASH_RE.test(u)) { go(u, DEFAULT_PAGE); return }
-    // bare path / ":path" → current node
-    const path = u.startsWith(':') ? u.slice(1) : u
-    const cur = navHash.value
-    if (HASH_RE.test(cur)) go(cur, path || DEFAULT_PAGE)
+  // Unique value per press: a constant would be swallowed by the firmware's
+  // storage SET-dedup if the key was ever left set by a dropped notify.
+  const reload = (sid: number) => {
+    device.sendJson(nest('nomad.cmd.reload', `${sid}|${Date.now()}`))
   }
 
-  const reload = () => { device.sendJson(nest('nomad.cmd.reload', '1')) }
-
-  const submit = (hash: string, path: string, data: Record<string, string>) => {
+  const submit = (sid: number, hash: string, path: string, data: Record<string, string>) => {
     const h = hash.trim().toLowerCase()
     if (!HASH_RE.test(h)) return
     // Stage the field map + trigger in one patch — the firmware sees the
-    // whole tree merged before the cmd.submit subscription fires.
+    // whole tree merged before the cmd.submit subscription fires. Fields go
+    // under this session's staging tree.
     const patch: Patch = {}
     const submitTree: Patch = {}
     for (const [k, v] of Object.entries(data)) submitTree[k] = v
-    patch.nomad = { submit: submitTree, cmd: { submit: `${h}:${path || DEFAULT_PAGE}` } }
+    patch.nomad = {
+      submit: { [String(sid)]: submitTree },
+      cmd: { submit: `${sid}|${h}:${path || DEFAULT_PAGE}` },
+    }
     device.sendJson(patch)
   }
 
-  const isBookmarked = (hash: string) =>
-    bookmarks.value.some(b => b.hash === hash.toLowerCase())
+  /* path: omit/'' = any bookmark on the host; pass a path for exact match. */
+  const isBookmarked = (hash: string, path = '') =>
+    bookmarks.value.some(b => b.hash === hash.toLowerCase() &&
+                              (!path || b.path === path))
 
-  const addBookmark = (hash: string, name = '', note = '') => {
+  const addBookmark = (hash: string, path = DEFAULT_PAGE, name = '', note = '') => {
     const h = hash.trim().toLowerCase()
     if (!HASH_RE.test(h)) return
-    device.sendJson(nest('nomad.cmd.bookmark.add', `${h}|${name}|${note}`))
+    device.sendJson(nest('nomad.cmd.bookmark.add',
+                         `${h}:${path || DEFAULT_PAGE}|${name}|${note}`))
   }
 
-  const delBookmark = (hash: string) => {
-    device.sendJson(nest('nomad.cmd.bookmark.del', hash.trim().toLowerCase()))
+  /* By id (from the bookmarks list), or a "<hash>[:<path>]" url. */
+  const delBookmark = (idOrUrl: string) => {
+    device.sendJson(nest('nomad.cmd.bookmark.del', idOrUrl.trim()))
   }
 
   /* An lxmf@<hash> address tapped in a page hands the contact to LXMF, which
@@ -208,12 +236,14 @@ export function useNomad(): UseNomad {
   const openLxmf = (hash: string) => {
     const h = hash.trim().toLowerCase()
     if (!HASH_RE.test(h)) return
-    device.sendJson(nest('lxmf.url_web', h))
+    /* Nonce: a repeat tap is a fresh value (the firmware no longer consumes
+     * the key — its unset raced the browser sync and ate the hash). */
+    device.sendJson(nest('lxmf.url_web', `${h}:${Date.now()}`))
   }
 
   return {
-    nodes, bookmarks, page, navStatus, navHash, navPath, navError, busy,
-    go, goUrl, reload, submit, isBookmarked, addBookmark, delBookmark, openLxmf,
+    nodes, bookmarks, session,
+    go, reload, submit, isBookmarked, addBookmark, delBookmark, openLxmf,
   }
 }
 

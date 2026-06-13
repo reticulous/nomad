@@ -104,6 +104,14 @@ function renderInline(text: string): { html: string; align: string | null; bg: b
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!
     if (ch !== '`') {
+      // Micron escape: backslash makes the next char literal (pages write
+      // \[ or \` to dodge markup) — NomadNet renders it bare.
+      if (ch === '\\' && i + 1 < text.length) {
+        if (st.bg) bgUsed = true
+        out += escapeHtml(text[i + 1]!)
+        i += 1
+        continue
+      }
       // Bare lxmf@<32hex> → clickable contact link (not mid-token).
       if ((ch === 'l' || ch === 'L') && (i === 0 || !/[0-9a-z@._-]/i.test(text[i - 1]!))) {
         const m = /^lxmf@([0-9a-fA-F]{32})\b/.exec(text.slice(i))
