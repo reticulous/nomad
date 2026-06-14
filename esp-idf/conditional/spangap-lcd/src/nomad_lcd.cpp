@@ -37,6 +37,7 @@
  * when:-gated init: hook (spangap/spangap-lcd) rather than a self-call.
  */
 #include "lcd.h"
+#include "mem.h"
 #include "storage.h"
 #include "compat.h"
 #include "nomad.h"   /* NOMAD_LCD_SESSION — this browser's session id */
@@ -1253,7 +1254,7 @@ void nomadSettingsPane(void* arg) {
         lv_label_set_text(rl, "Remove");
         lv_obj_center(rl);
         size_t hn = b.id.size() + 1;          /* del sentinel takes the id */
-        char* h = static_cast<char*>(malloc(hn));
+        char* h = static_cast<char*>(gp_alloc(hn));
         memcpy(h, b.id.c_str(), hn);
         lv_obj_add_event_cb(rm, onRemoveBookmark,       LV_EVENT_CLICKED, h);
         lv_obj_add_event_cb(rm, onRemoveBookmarkDelete, LV_EVENT_DELETE,  h);
