@@ -453,8 +453,11 @@ static void startFetch(int sid, const std::string& hash, const std::string& path
     bool reuse = (!wasActive && s.handle >= 0 && s.link_hash == hash);
     if (!reuse) {
         if (s.handle >= 0) dropLink(sid);   /* link is to a different node */
+        /* s.nomad.link_timeout (seconds, 0 = let rnsd derive from interface
+         * speed) overrides the establishment timeout for fetch links. */
+        uint32_t link_to_ms = (uint32_t)storageGetInt("s.nomad.link_timeout", 0) * 1000;
         int h = rnsdLinkOpen(dh, NOMAD_ASPECT, /*identity_key=*/"", tag,
-                             /*path_timeout_ms=*/0, /*ref=*/sid,
+                             /*path_timeout_ms=*/0, link_to_ms, /*ref=*/sid,
                              onFetchLinkRecv, onFetchLinkDisc);
         if (h < 0) {
             warn("s%d go: rnsdLinkOpen failed (%d)", sid, h);

@@ -51,6 +51,10 @@ Key surfaces:
 - `nomad.s<sid>.page.*` — a session's fetched page bytes (Micron
   source; renderers parse this)
 - `s.nomad.bookmarks.<id>` — operator bookmarks: `<hash>[:<path>]|<name>|<note>` (host AND path)
+- `s.nomad.link_timeout` — seconds a fetch Link may sit establishing
+  before it fails; 0 (default) lets rnsd derive the budget from the next
+  hop's interface speed
+
 - `s.nomad.page_font` — LCD page-font index, smallest first (0 = Micro
   2×3, an unreadable whole-page layout thumbnail at 160 columns;
   1 = Tom Thumb 4×6, the default; 2 = Spleen 5×8); stepped by the −/+
