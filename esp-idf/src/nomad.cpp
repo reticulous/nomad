@@ -26,6 +26,7 @@
 #include "spangap.h"
 #include "ports.h"
 #include "rnsd.h"     /* rnsdLinkOpen / rnsdLinkRequest / rnsdLinkTeardown / release */
+#include "mem.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -202,7 +203,7 @@ struct Session {
     std::string path;
     int         started_s;
 };
-static Session s_sess[NOMAD_SESSIONS] = {};  /* handles set to -1 in nomadTaskMain */
+PSRAM_BSS static Session s_sess[NOMAD_SESSIONS] = {};  /* handles set to -1 in nomadTaskMain */
 
 static bool validSid(int sid) { return sid >= 0 && sid < NOMAD_SESSIONS; }
 
@@ -718,7 +719,7 @@ static int nodeCountAndMaybeOldest(int max_entries, std::string* oldest_out)
 static void onAnnounceFromRnsd(int handle, size_t /*bytesAvail*/)
 {
     if (handle != s_announce_sub_handle) return;
-    static uint8_t buf[NOMAD_ANNOUNCE_HDR + 1024];
+    PSRAM_BSS static uint8_t buf[NOMAD_ANNOUNCE_HDR + 1024];
     size_t n = itsRecv(handle, buf, sizeof(buf), 0);
     if (n < NOMAD_ANNOUNCE_HDR) {
         if (n > 0) warn("announce sub: short frame %zu B", n);
