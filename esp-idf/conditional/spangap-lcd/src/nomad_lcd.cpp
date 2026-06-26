@@ -37,6 +37,7 @@
  * when:-gated init: hook (spangap/spangap-lcd) rather than a self-call.
  */
 #include "lcd.h"
+#include "lcd_app.h"   /* LcdApp + lcdInstall */
 #include "mem.h"
 #include "storage.h"
 #include "compat.h"
@@ -1289,6 +1290,20 @@ void nomadSettingsPane(void* arg) {
     }
 }
 
+/* NomadApp — onCreate builds the browser; onClose nulls the widget handles so a
+ * storage change (the session subscription outlives the layer) early-returns
+ * instead of touching freed objects after eviction. The persistent list/status
+ * timers guard on these same handles. */
+class NomadApp : public LcdApp {
+public:
+    NomadApp() : LcdApp({ .name = "Nomad", .iconBasename = "rns" }) {}
+    void onCreate(lv_obj_t* root) override { nomadApp(root); }
+    void onClose() override {
+        s_list = nullptr; s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr;
+        s_status = nullptr; s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
+    }
+};
+
 }  // namespace
 
 /* Register the Nomad-browser launcher program — a when:-gated init: hook
@@ -1296,6 +1311,6 @@ void nomadSettingsPane(void* arg) {
  * compiled only when the lcd straddle is staged, so no #if is needed. Plain
  * C++ linkage to match the generated dispatcher's forward decl. */
 void nomadLcdRegister(void) {
-    lcdRegister("Nomad", "rns", nomadApp);
+    lcdRun([](void*) { lcdInstall(new NomadApp()); });   /* tile build is LVGL: on the lcd task */
     lcdRegisterSettings("Mesh Network/Nomad", "Nomad Network", nomadSettingsPane, 3);
 }
