@@ -1,5 +1,5 @@
 /**
- * nomad — Nomad Network page-client task (docs/plans/nomad.md Phase 1).
+ * nomad — Nomad Network page-client task.
  *
  * Modelled on the lxmf task: storage is the API, zero mR includes (rides
  * rnsd's byte-array API: announce fan-out + rnsdLinkOpen + rnsdLinkRequest),
@@ -25,7 +25,7 @@
 #include "nomad.h"
 #include "spangap.h"
 #include "ports.h"
-#include "rnsd.h"     /* rnsdLinkOpen / rnsdLinkRequest / rnsdLinkTeardown / release */
+#include "rnsd.h"     /* rnsdLinkOpen / rnsdLinkRequest / release */
 #include "mem.h"
 
 #include "freertos/FreeRTOS.h"
@@ -286,19 +286,14 @@ static void publishPage(int sid, const std::string& hash, const std::string& pat
     logPage(key, body, len);
 }
 
-/* Close a session's open link + free our ITS conn. Drop our conn FIRST,
- * then teardown: the disconnect makes rnsd null the slot's handle, so the
- * teardown's linkFreeSlot skips its own itsDisconnect — only one side ever
- * disconnects the conn, so no stale DISCONNECT can hit a reused handle (the
- * earlier double-free). itsConnect is synchronous + FIFO-after the teardown
- * aux, so a same-tag reopen right after sees the slot already freed. */
+/* Close a session's open link + free our ITS conn. Closing our handle
+ * tears the Link down in rnsd (onLinkDisconnect) and frees the slot + tag;
+ * itsConnect is synchronous + FIFO-after, so a same-tag reopen right after
+ * sees the slot already freed. */
 static void dropLink(int sid)
 {
     Session& s = s_sess[sid];
     if (s.handle >= 0) { itsDisconnect(s.handle); s.handle = -1; }
-    char tag[16];
-    sessTag(sid, tag);
-    rnsdLinkTeardown(tag);
     s.link_hash.clear();
 }
 
@@ -344,8 +339,8 @@ static void onNomadAux(TaskHandle_t /*sender*/, const void* data, size_t len)
     for (int i = 0; i < NOMAD_SESSIONS; i++)
         if (s_sess[i].active && (int)d.opaque_id == s_sess[i].req_id) { sid = i; break; }
 
-    /* Phase 1 only drives request/response (page GETs). /file Resource
-     * downloads (RNSD_LINK_RESOURCE_INBOUND_DONE) are Phase 5. */
+    /* Only request/response (page GETs) is handled here. /file Resource
+     * downloads (RNSD_LINK_RESOURCE_INBOUND_DONE) aren't handled yet. */
     if (d.opcode == RNSD_LINK_REQUEST_RESPONSE) {
         if (sid < 0) {
             verb("aux: stray response cid=%u (no matching fetch)",
@@ -532,7 +527,7 @@ static void onCmdReload(const char* key, const char* val)
     startFetch(sid, hash, path, /*bypass_cache=*/true);
 }
 
-/* Form submit (Phase 4). The frontend stages the field values under
+/* Form submit. The frontend stages the field values under
  * `nomad.submit.<field_*|var_*>` (keys are already the NomadNet map keys),
  * then writes `nomad.cmd.submit = "<hash>:<path>"`. We pack those k/v into
  * a msgpack map and issue a request with data_packed=true so µR splices it
