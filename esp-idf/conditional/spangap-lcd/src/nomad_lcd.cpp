@@ -1296,7 +1296,7 @@ void nomadSettingsPane(void* arg) {
  * timers guard on these same handles. */
 class NomadApp : public LcdApp {
 public:
-    NomadApp() : LcdApp({ .name = "Nomad", .iconBasename = "rns" }) {}
+    NomadApp() : LcdApp({ .name = "Nomad", .iconBasename = "nomad" }) {}
     void onCreate(lv_obj_t* root) override { nomadApp(root); }
     void onClose() override {
         s_list = nullptr; s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr;
