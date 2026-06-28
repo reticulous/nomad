@@ -4,12 +4,12 @@
  * Micron is Nomad Network's text-markup format. The firmware never parses
  * it (bytes in, bytes out); the viewing endpoint renders. This is the SPA
  * renderer — wide layout, mouse-clickable links, real text selection — as
- * opposed to the on-device C++ → LVGL renderer (Phase 3), which diverges in
- * layout + interaction by design.
+ * opposed to the on-device C++ → LVGL renderer, which diverges in layout +
+ * interaction by design.
  *
- * Reimplemented from the Micron grammar (docs/nomad.md "Micron markup",
- * which tracks NomadNet's MicronParser.py). NomadNet is GPL-3.0 — this is
- * an independent implementation, not a port.
+ * Reimplemented from the Micron grammar (see ../../../INTERNALS.md "Micron
+ * markup", which tracks NomadNet's MicronParser.py). NomadNet is GPL-3.0 —
+ * this is an independent implementation, not a port.
  *
  * SECURITY: page bytes come from an *untrusted remote node*. Every run of
  * literal text is HTML-escaped, and the renderer only ever emits a fixed
@@ -27,7 +27,7 @@
  *     `Bxxx     bg color (3 hex)   `b reset bg
  *     `c `l `r `a   line alignment (center/left/right/default)
  *     `[label`target]   link (label optional → target is the label)
- *     `<w|name`value>   input field (rendered disabled in v1; forms = Phase 4)
+ *     `<w|name`value>   input field (NomadWindow reads its value on submit)
  *   line level:
  *     `=        horizontal divider
  *     >, >>, >>>   headings (h1/h2/h3)

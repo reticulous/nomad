@@ -42,7 +42,7 @@
  *
  * History/back is frontend-owned — the firmware is stateless re history.
  *
- * See docs/nomad.md.
+ * See README.md / INTERNALS.md.
  */
 #pragma once
 

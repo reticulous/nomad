@@ -1,7 +1,7 @@
 /**
  * nomad — Nomad Network page browser (SPA side).
  *
- * Storage is the API (mirrors the firmware nomad task, docs/nomad.md):
+ * Storage is the API (mirrors the firmware nomad task; see ../../../INTERNALS.md):
  *   reads  = computed() over the reactive device mirror
  *   writes = cmd sentinels via device.sendJson()
  *

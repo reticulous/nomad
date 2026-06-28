@@ -1,8 +1,8 @@
 /**
  * nomad_lcd.cpp — on-device "Nomad" browser program (LVGL).
  *
- * The on-device half of the Nomad Network page browser (docs/plans/nomad.md
- * Phase 3). Two screens within the one program layer, mirroring the
+ * The on-device half of the Nomad Network page browser (see ../../../../INTERNALS.md).
+ * Two screens within the one program layer, mirroring the
  * LXMessenger model:
  *   - List:  bookmarks on top, announce-drift nodes below; tap one to open
  *            its index page.
@@ -19,12 +19,12 @@
  * with bg colours or widgets render as a flex row of styled labels. v1
  * simplifications (LCD only): bold/italic/underline style codes are dropped
  * (headings are colour-emphasised; links are link-coloured + underlined);
- * input fields render as placeholders (forms = Phase 4). Reimplemented from
- * the Micron grammar — NomadNet is GPL-3.0, not copied.
+ * input fields render as editable textareas, submitted as forms. Reimplemented
+ * from the Micron grammar — NomadNet is GPL-3.0, not copied.
  *
  * Storage is the API (same keys the firmware nomad task + SPA use):
- *   nomad.nodes.<hex>        "<last_s>|<hops>|<name>"   announce drift
- *   s.nomad.bookmarks.<hex>  "<name>|<note>"
+ *   nomad.nodes.<hex>        "<last_s>|<hops>|<name>"   announced nodes
+ *   s.nomad.bookmarks.<id>   "<hash>[:<path>]|<name>|<note>"
  *   nomad.s6.nav.{status,hash,path}                     navigation state
  *   nomad.s6.page.{body,size,truncated,hash,path}       current page
  *   nomad.cmd.go = "6|<hash>:<path>"                    navigate sentinel
