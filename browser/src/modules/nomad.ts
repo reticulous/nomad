@@ -17,7 +17,7 @@
  *        / .submit=<sid>|<hash>:<path> (fields under nomad.submit.<sid>.*)
  *        / .bookmark.add / .bookmark.del
  */
-import { ref, computed, type ComputedRef } from 'vue'
+import { ref, computed, watch, type ComputedRef } from 'vue'
 import { useDeviceStore } from 'spangap-browser/stores/device'
 import { useMenuStore } from 'spangap-browser/stores/menu'
 import { registerApp } from 'spangap-browser/lib/apps'
@@ -32,6 +32,11 @@ export const nomadFocus = ref(0)
 
 /* Menu "Nomad Browser" action: only ever show + raise, never hide. */
 export function showNomad() { nomadVisible.value = true; nomadFocus.value++ }
+
+/** Open request from another app (an LXMF message's Nomad link, delivered via
+ *  the `nomad.url_web` sentinel). NomadWindow watches this and opens the URL in
+ *  a tab. The nonce makes every request a fresh value so a repeat re-fires. */
+export const nomadOpenUrl = ref<{ hash: string; path: string; nonce: number } | null>(null)
 
 export const DEFAULT_PAGE = '/page/index.mu'
 
@@ -250,6 +255,24 @@ export function useNomad(): UseNomad {
 
 export function registerNomad() {
   const menu = useMenuStore()
+
+  /* A Nomad page link tapped in an LXMF message arrives as `nomad.url_web`
+   * (written by the lxmf module). Bring the Nomad browser forward and open the
+   * page — the exact reverse of nomad→lxmf (lxmf.url_web). Decoupled: we only
+   * read the shared var. */
+  const device = useDeviceStore()
+  watch(() => String(device.get('nomad.url_web') ?? ''), (raw) => {
+    // "<hash>[:<path>]|<nonce>" — nonce makes every tap a fresh value.
+    const bar = raw.lastIndexOf('|')
+    const url = (bar >= 0 ? raw.slice(0, bar) : raw).trim()
+    if (!url) return
+    const colon = url.indexOf(':')
+    const hash = (colon >= 0 ? url.slice(0, colon) : url).toLowerCase()
+    if (!HASH_RE.test(hash)) return
+    const path = colon >= 0 ? url.slice(colon + 1) : DEFAULT_PAGE
+    showNomad()
+    nomadOpenUrl.value = { hash, path: path || DEFAULT_PAGE, nonce: Date.now() }
+  })
 
   /* Settings → Mesh Network → Nomad Network (the Nomad settings panel). */
   menu.register('settings/mesh/nomad', 'Nomad Network', { type: 'panel', component: NomadPanel }, { placement: 4 })

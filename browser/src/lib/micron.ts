@@ -71,6 +71,21 @@ function freshStyle(): Style {
   return { bold: false, italic: false, underline: false, fg: null, bg: null }
 }
 
+/** Reset in place — for `` (reset-all). Mutates so a persistent style object
+ *  threaded across lines keeps its identity. */
+function resetStyle(s: Style): void {
+  s.bold = false; s.italic = false; s.underline = false; s.fg = null; s.bg = null
+}
+
+function copyStyle(s: Style): Style {
+  return { bold: s.bold, italic: s.italic, underline: s.underline, fg: s.fg, bg: s.bg }
+}
+
+function restoreStyle(dst: Style, src: Style): void {
+  dst.bold = src.bold; dst.italic = src.italic; dst.underline = src.underline
+  dst.fg = src.fg; dst.bg = src.bg
+}
+
 function styleCss(s: Style): string {
   const css: string[] = []
   if (s.bold) css.push('font-weight:bold')
@@ -86,12 +101,14 @@ function styleActive(s: Style): boolean {
 }
 
 /** Render one line's inline content (the `text` after any block prefix has
- *  been stripped). Returns { html, align } — align is set if a `c/`l/`r/`a
- *  control appeared. */
-function renderInline(text: string): { html: string; align: string | null; bg: boolean } {
+ *  been stripped). `st` is the running style, threaded across lines and
+ *  mutated in place — Micron colours/formatting bleed line-to-line until an
+ *  explicit reset (matches NomadNet's MicronParser, which keeps one state for
+ *  the whole document). `alignIn` is the running alignment, likewise persisted.
+ *  Returns { html, align, bg }; read `st.bg` after for the row's fill colour. */
+function renderInline(text: string, st: Style, alignIn: string | null): { html: string; align: string | null; bg: boolean } {
   let out = ''
-  let align: string | null = null
-  let st = freshStyle()
+  let align: string | null = alignIn
   let spanOpen = false
   let bgUsed = false   // any visible char drawn over a background color → mosaic row
 
@@ -131,7 +148,7 @@ function renderInline(text: string): { html: string; align: string | null; bg: b
     // ` control sequence
     const nx = text[i + 1]
     if (nx === undefined) { break }            // trailing backtick → drop
-    if (nx === '`') { st = freshStyle(); syncSpan(); i += 1; continue }  // `` reset
+    if (nx === '`') { resetStyle(st); syncSpan(); i += 1; continue }  // `` reset
     if (nx === '!') { st.bold = !st.bold; syncSpan(); i += 1; continue }
     if (nx === '_') { st.underline = !st.underline; syncSpan(); i += 1; continue }
     if (nx === '*') { st.italic = !st.italic; syncSpan(); i += 1; continue }
@@ -197,12 +214,25 @@ function renderInline(text: string): { html: string; align: string | null; bg: b
  * are "graphics" and must tile vertically — see micronToHtml's .mgfx tag. */
 const MOSAIC_RE = /[─-▟⠀-⣿\u{1FB00}-\u{1FBFF}]/u
 
+/** Row-level style: end-of-line background fills the whole line to the right
+ *  edge of the screen (NomadNet wraps each rendered line in an AttrMap carrying
+ *  the current bg), plus its alignment. */
+function rowStyle(st: Style, align: string | null): string {
+  const css: string[] = []
+  if (align) css.push(`text-align:${align}`)
+  if (st.bg) css.push(`background-color:${st.bg}`)
+  return css.length ? ` style="${css.join(';')}"` : ''
+}
+
 /** Render a full Micron document to an HTML string. */
 export function micronToHtml(src: string): string {
   const lines = src.split(/\r?\n/)
   const out: string[] = []
   let literal = false
   let litBuf: string[] = []
+  // Style + alignment persist across lines and only reset on explicit markup.
+  const st = freshStyle()
+  let align: string | null = null
 
   const flushLiteral = () => {
     if (litBuf.length) {
@@ -219,29 +249,33 @@ export function micronToHtml(src: string): string {
     }
     if (literal) { litBuf.push(raw); continue }
 
-    if (raw.length === 0) { out.push('<div class="mline">&nbsp;</div>'); continue }
+    // Blank line still carries the running background (full-width colour bar).
+    if (raw.length === 0) { out.push(`<div class="mline"${rowStyle(st, null)}>&nbsp;</div>`); continue }
     if (raw[0] === '#') continue                                   // comment
 
     // `= divider (optional repeat char after =, cosmetic)
     if (raw.startsWith('`=')) { out.push('<hr class="mdivider" />'); continue }
 
-    // Headings: leading > run.
+    // Headings: leading > run. NomadNet latches the style, renders the heading,
+    // then restores it — so colour changes *inside* a heading line don't bleed.
     if (raw[0] === '>') {
       let depth = 0
       while (depth < raw.length && raw[depth] === '>') depth++
       const level = Math.min(depth, 3)
-      const { html, align } = renderInline(raw.slice(depth).replace(/^\s/, ''))
-      const a = align ? ` style="text-align:${align}"` : ''
-      out.push(`<h${level} class="mh"${a}>${html}</h${level}>`)
+      const saved = copyStyle(st)
+      const r = renderInline(raw.slice(depth).replace(/^\s/, ''), st, align)
+      align = r.align
+      restoreStyle(st, saved)
+      out.push(`<h${level} class="mh"${rowStyle(st, align)}>${r.html}</h${level}>`)
       continue
     }
 
-    const { html, align, bg } = renderInline(raw)
-    const a = align ? ` style="text-align:${align}"` : ''
+    const r = renderInline(raw, st, align)
+    align = r.align
     // Graphics rows (block/box glyphs or background-colour mosaics) tile only
     // with zero leading; tag them so the viewer drops their line-height.
-    const gfx = bg || MOSAIC_RE.test(raw)
-    out.push(`<div class="mline${gfx ? ' mgfx' : ''}"${a}>${html}</div>`)
+    const gfx = r.bg || MOSAIC_RE.test(raw)
+    out.push(`<div class="mline${gfx ? ' mgfx' : ''}"${rowStyle(st, align)}>${r.html}</div>`)
   }
   if (literal) flushLiteral()
   return out.join('\n')

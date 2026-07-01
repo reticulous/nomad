@@ -136,7 +136,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import FloatingWindow from 'spangap-browser/components/FloatingWindow.vue'
-import { useNomad, DEFAULT_PAGE, WEB_SESSIONS, type NavStatus, type NomadNode, type Bookmark } from '../modules/nomad'
+import { useNomad, nomadOpenUrl, DEFAULT_PAGE, WEB_SESSIONS, type NavStatus, type NomadNode, type Bookmark } from '../modules/nomad'
 import { micronToHtml } from '../lib/micron'
 import { useWinZoom } from 'rns/lib/winZoom'
 
@@ -569,6 +569,13 @@ function toggleBookmark() {
     nomad.addBookmark(curHash.value, curPath.value, node?.name ?? '', '')
   }
 }
+
+/* Open requests from other apps (an LXMF message's Nomad link, via the
+ * module's nomadOpenUrl channel) land in a tab like a sidebar pick. The window
+ * is already being raised by showNomad() in the module watcher. */
+watch(() => nomadOpenUrl.value, (req) => {
+  if (req) openUrl(req.hash, req.path)
+})
 
 /* Live mirror, one watcher per firmware session: copy the session's
  * nav/page state into whichever tab owns that sid — foreground or not, so

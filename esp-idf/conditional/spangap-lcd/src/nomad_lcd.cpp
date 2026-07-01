@@ -596,6 +596,16 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
     lv_color_t color = hlevel > 0 ? lv_color_white() : lv_color_hex(0xd0d4da);
     std::vector<Seg> segs = scanInline(line, st);
 
+    /* End-of-line background paints the whole line out to the right edge of
+     * the screen (NomadNet fills each row with the current bg), so tag the
+     * full-width container with it below. NOCOL → no fill. */
+    uint32_t eolBg = st.bg;
+    auto fillBg = [&](lv_obj_t* o) {
+        if (eolBg == NOCOL) return;
+        lv_obj_set_style_bg_color(o, lv_color_hex(eolBg), 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    };
+
     bool hasWidget = false, hasFg = false, hasBg = false;
     for (auto& s : segs) {
         if (s.kind != SEG_TEXT) hasWidget = true;
@@ -605,7 +615,7 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
         }
     }
 
-    if (!hasWidget && !hasFg && !hasBg) {
+    if (!hasWidget && !hasFg && !hasBg && eolBg == NOCOL) {
         std::string text;
         for (auto& s : segs) text += s.text;
         lv_obj_t* l = mkLabel(parent, printable(text, false, kPageFont), color, kPageFont);
@@ -621,6 +631,7 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
         lv_obj_set_style_text_font(sg, kPageFont, 0);
         lv_obj_set_style_text_color(sg, color, 0);
         lv_obj_set_style_text_line_space(sg, 0, 0);
+        fillBg(sg);
         int spans = 0;
         for (auto& s : segs) {
             std::string txt = printable(s.text, false, kPageFont);
@@ -643,6 +654,7 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
     lv_obj_set_style_pad_column(row, 0, 0);
     lv_obj_set_style_pad_row(row, 0, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    fillBg(row);      /* eol bg fills the row's tail past the last segment */
     for (auto& s : segs) {
         if      (s.kind == SEG_LINK)  addLink(row, s);
         else if (s.kind == SEG_LXMF)  addLxmf(row, s);
@@ -686,7 +698,15 @@ void renderMicron(lv_obj_t* parent, const std::string& body) {
         if (trimmed == "`") { if (literal) { flushLit(); literal = false; } else literal = true; continue; }
         if (literal) { lit += line; lit += "\n"; continue; }
 
-        if (line.empty()) { mkLabel(parent, " ", lv_color_hex(0x707880), kPageFont); continue; }
+        if (line.empty()) {
+            lv_obj_t* l = mkLabel(parent, " ", lv_color_hex(0x707880), kPageFont);
+            if (st.bg != NOCOL) {   /* active bg bleeds through blank lines too */
+                lv_obj_set_width(l, lv_pct(100));
+                lv_obj_set_style_bg_color(l, lv_color_hex(st.bg), 0);
+                lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
+            }
+            continue;
+        }
         if (line[0] == '#') continue;                                   /* comment */
         if (line.rfind("`=", 0) == 0) {                                 /* divider */
             lv_obj_t* d = lv_obj_create(parent);
@@ -704,7 +724,11 @@ void renderMicron(lv_obj_t* parent, const std::string& body) {
             content = line.substr(hlevel);
             if (!content.empty() && content[0] == ' ') content.erase(0, 1);
         }
+        /* Headings latch the running style: colour changes *inside* a heading
+         * line render but don't bleed into the body that follows. */
+        MStyle saved = st;
         addLine(parent, content, hlevel, st);
+        if (hlevel > 0) st = saved;
     }
     if (literal) flushLit();
 }
@@ -888,6 +912,24 @@ void openPage(const std::string& hash, const std::string& path = "") {
     s_hist.clear();                       /* fresh context from the site list */
     navigate(hash, path.empty() ? DEFAULT_PAGE : path, /*push=*/false);
     rebuildPage();
+}
+
+/* An LXMF message's Nomad link was tapped (lxmf_lcd wrote nomad.url_lcd).
+ * Runs on the lcd task (subscribed via lcdRun in nomadLcdRegister), so LVGL is
+ * safe here. Bring the Nomad browser forward and open the page. Mirrors
+ * lxmf_lcd's onLcdOpenUrl (the reverse direction). */
+void onLcdOpenPage(const char* /*key*/, const char* val) {
+    if (!val || !*val) return;                     /* a clear */
+    std::string s(val);
+    size_t bar = s.rfind('|');                     /* "<hash>:<path>|<nonce>" */
+    if (bar != std::string::npos) s.erase(bar);
+    size_t colon = s.find(':');
+    std::string hash = colon == std::string::npos ? s : s.substr(0, colon);
+    std::string path = colon == std::string::npos ? std::string() : s.substr(colon + 1);
+    if (!isHash(hash)) return;
+    for (auto& c : hash) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    lcdShowProgram("Nomad");                        /* build (first open) + raise */
+    openPage(hash, path);                           /* navigate this session */
 }
 
 /* ---- list screen ---- */
@@ -1313,4 +1355,10 @@ public:
 void nomadLcdRegister(void) {
     lcdRun([](void*) { lcdInstall(new NomadApp()); });   /* tile build is LVGL: on the lcd task */
     lcdRegisterSettings("Mesh Network/Nomad", "Nomad Network", nomadSettingsPane, 3);
+
+    /* An LXMF message's Nomad link (tapped in LXMessenger) writes nomad.url_lcd.
+     * Subscribe ON the lcd task so the callback may touch LVGL directly — and
+     * register here at init, not in nomadApp, so the trigger works even if Nomad
+     * was never opened. */
+    lcdRun([](void*) { storageSubscribeChanges("nomad.url_lcd", onLcdOpenPage); });
 }

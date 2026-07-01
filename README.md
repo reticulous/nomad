@@ -118,6 +118,23 @@ already the NomadNet map keys) before `nomad.cmd.submit` is written; nomad packs
 them into a msgpack map, deletes the staging tree, and issues the request.
 History/back is **frontend-owned** — the firmware keeps no nav history.
 
+### Open-page triggers (from an LXMF message)
+
+The reverse of nomad's clickable `lxmf@<hash>` links: [lxmf](../lxmf) turns a
+`<32-hex hash>:/path` page URL quoted in a message into a tappable link.
+Activating one writes the URL to one of two ephemeral sentinels, and the
+matching Nomad frontend comes forward and navigates to it:
+
+| Key | Written by | Reaction |
+|---|---|---|
+| `nomad.url_web` | the lxmf web messenger | the Nomad Browser window comes forward (`showNomad()`) and opens the page in a tab |
+| `nomad.url_lcd` | the on-device LXMessenger | the on-device Nomad app comes forward (`lcdShowProgram("Nomad")`) and opens the page |
+
+The value is `<hash>[:<path>]` (default `/page/index.mu`) suffixed `\|<nonce>`
+so re-tapping the same link re-fires. Each UI surface reacts only to its own
+key. No firmware task consumes these — the frontend that reacts drives the
+fetch through the normal `nomad.cmd.go` path.
+
 ## CLI — `nomad`
 
 ```
