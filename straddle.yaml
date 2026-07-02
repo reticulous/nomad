@@ -11,7 +11,7 @@
 schema_version: 1
 name: reticulous/nomad
 prefix: nomad
-version: 0.1.0
+version: 0.0.0
 firmware: esp-idf
 # LCD slice (esp-idf/lcd/) — see lxmf for notes on activator gating.
 browser: browser
