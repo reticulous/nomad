@@ -72,11 +72,16 @@ namespace {
  * block-element set, so micron "graphics" render; the 2 bpp fonts grey the
  * partial-coverage pixels. s.nomad.page_font persists the index; kPageFont is
  * refreshed from it on every page rebuild. */
-const lv_font_t* const kFont = &lv_font_montserrat_12_latin;
-const lv_font_t* const kPageFonts[] = { &lv_font_micro_2x3, &lv_font_tomthumb_4x6,
-                                        &lv_font_spleen_5x8 };
-const int kPageFontN = sizeof(kPageFonts) / sizeof(kPageFonts[0]);
-const lv_font_t* kPageFont = kPageFonts[1];
+/* Chrome font (headers, links, form fields) — the vector UI face, scaled by the
+ * platform zoom. Set by refreshChromeFont() before any UI is built; the bitmap
+ * default is only a placeholder for the pre-build window. */
+const lv_font_t* kFont = &lv_font_montserrat_12_latin;
+/* Page-font ladder: all vector MONO now (was micro/tomthumb/spleen bitmaps at
+ * the bottom). s.nomad.page_font persists the index; the −/+ header steppers
+ * walk it. Not zoom-scaled — the ladder IS the density control. */
+const int kPageFontPx[] = { 10, 12, 14, 16, 20 };
+const int kPageFontN = (int)(sizeof(kPageFontPx) / sizeof(kPageFontPx[0]));
+const lv_font_t* kPageFont = nullptr;   /* resolved from the index on rebuild */
 const int HDR_H = 20;
 
 int pageFontIdx() {
@@ -84,6 +89,21 @@ int pageFontIdx() {
     if (idx < 0) idx = 0;
     if (idx >= kPageFontN) idx = kPageFontN - 1;
     return idx;
+}
+
+/* Resolve a ladder index to a vector mono font (lcd task — created lazily). */
+const lv_font_t* resolvePageFont(int idx) {
+    if (idx < 0) idx = 0;
+    if (idx >= kPageFontN) idx = kPageFontN - 1;
+    return lcdFont(LcdFace::MONO, kPageFontPx[idx]);
+}
+
+/* (Re)resolve the vector chrome + page fonts at the current UI zoom. Call at the
+ * top of each top-level build (onCreate / rebuildList / rebuildPage) so both are
+ * live before any label reads kFont/kPageFont. Lcd task. */
+void refreshFonts() {
+    kFont     = lcdFont(LcdFace::UI, (int)(14 * lcdUiScale() + 0.5f));
+    kPageFont = resolvePageFont(pageFontIdx());
 }
 const char* const DEFAULT_PAGE = "/page/index.mu";
 
@@ -626,8 +646,9 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
 
     if (!hasWidget && !hasBg) {        /* fg colours only: inline-flowing spans */
         lv_obj_t* sg = lv_spangroup_create(parent);
+        /* A fixed width (here full-width) drives wrapping in LVGL 9.5;
+         * lv_spangroup_set_mode() is deprecated and warns, so it's gone. */
         lv_obj_set_width(sg, lv_pct(100));
-        lv_spangroup_set_mode(sg, LV_SPAN_MODE_BREAK);
         lv_obj_set_style_text_font(sg, kPageFont, 0);
         lv_obj_set_style_text_color(sg, color, 0);
         lv_obj_set_style_text_line_space(sg, 0, 0);
@@ -816,12 +837,12 @@ void buildPageShell() {
         storageSet("s.nomad.page_font", idx);
         rebuildPage();
     };
-    s_fontMinus = mkLabel(hdr, LV_SYMBOL_MINUS, lv_color_hex(0xc0c8d0), &lv_font_montserrat_14);
+    s_fontMinus = mkLabel(hdr, LV_SYMBOL_MINUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
     lv_obj_align(s_fontMinus, LV_ALIGN_RIGHT_MID, -45, 0);
     lv_obj_add_flag(s_fontMinus, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(s_fontMinus, 12);
     lv_obj_add_event_cb(s_fontMinus, fontStep, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
-    s_fontPlus = mkLabel(hdr, LV_SYMBOL_PLUS, lv_color_hex(0xc0c8d0), &lv_font_montserrat_14);
+    s_fontPlus = mkLabel(hdr, LV_SYMBOL_PLUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
     lv_obj_align(s_fontPlus, LV_ALIGN_RIGHT_MID, -6, 0);
     lv_obj_add_flag(s_fontPlus, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(s_fontPlus, 12);
@@ -856,7 +877,7 @@ void buildPageShell() {
 
 void rebuildPage() {
     if (!s_pageBody) return;
-    kPageFont = kPageFonts[pageFontIdx()];
+    refreshFonts();
     lv_obj_clean(s_pageBody);
     s_linkTargets.clear();
     s_lxmfTargets.clear();
@@ -1045,6 +1066,7 @@ void collectBookmark(const char* key, const char* val) {
 
 void rebuildList() {
     if (!s_list) return;
+    refreshFonts();
     s_listDirty = false;
     int scrollY = lv_obj_get_scroll_y(s_list);   /* hold the reading position */
     lv_obj_clean(s_list);
@@ -1156,6 +1178,7 @@ void onStorageChange(const char* key, const char*) {
 /* ---- entry point (lcd task, on first open / relaid layer) ---- */
 
 void nomadApp(void* arg) {
+    refreshFonts();   /* vector chrome/page fonts live before any label is built */
     s_layer = static_cast<lv_obj_t*>(arg);
     s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr; s_status = nullptr;
     s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
