@@ -18,16 +18,18 @@ browser: browser
 platforms: [idf]
 requires:
   - reticulous/rns
-# Auto-init: folded into the generated spangapInitStraddles() dispatcher. Runs
-# in the straddle band; `requires: reticulous/rns` puts rnsd ahead of it, and
-# the platform band guarantees the lcd task already exists. The on-device
-# launcher tile registers via the when:-gated nomadLcdRegister hook, which only
-# runs (and only compiles) when spangap-lcd is staged. The consumer's app_main
-# references nomad nowhere.
-init:
-  - call: nomadInit
-  - call: nomadLcdRegister
-    when: spangap/spangap-lcd
+# Boot-registered services: the generated trampoline `new`s each class and
+# registers it. NomadService (the nomad task) runs in the straddle band in all
+# builds; `requires: reticulous/rns` puts rnsd ahead of it. NomadApp is the
+# on-device launcher tile — an LcdApp, so its one entry installs the tile
+# (LcdApp::onInit) and does its boot wiring (NomadApp::appInit — Settings pane,
+# the nomad.url_lcd open-page hook). It is when:-gated on spangap-lcd, so it only
+# runs (and only compiles — the class lives under conditional/spangap-lcd/) when
+# the lcd straddle is staged; the platform band brings lcd up first. The
+# consumer's app_main references nomad nowhere.
+services:
+  - { class: NomadService, header: nomad.h }
+  - { class: NomadApp, header: nomad_app.h, when: spangap/spangap-lcd }
 
 # Browser-side UI registration (parallel to init: above) — auto-wired into
 # the buildable SPA via straddles.gen.ts; no web-interface edit needed.

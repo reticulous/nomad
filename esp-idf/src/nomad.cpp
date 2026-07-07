@@ -956,7 +956,7 @@ static void nomadTaskMain(void*)
     }
 }
 
-void nomadInit(void)
+void NomadService::onInit()
 {
     if (storageGetInt("s.nomad.version", 0) < NOMAD_VERSION) {
         storageBegin();
@@ -970,8 +970,7 @@ void nomadInit(void)
     /* Core 1, prio 1, 8 KB PSRAM stack — same class as lxmf. */
     spawnTask(nomadTaskMain, TAG, 8192, nullptr, 1, 1, STACK_PSRAM);
 
-    /* The on-device Nomad-browser launcher tile self-registers via the
-     * when:-gated nomadLcdRegister init: hook (spangap/spangap-lcd), defined in
-     * conditional/spangap-lcd/ — not called here, so non-LCD builds drop it
-     * entirely. */
+    /* The on-device Nomad-browser launcher tile is a separate when:-gated
+     * service (NomadApp, spangap/spangap-lcd), defined in conditional/spangap-lcd/
+     * — not wired here, so non-LCD builds drop it entirely. */
 }

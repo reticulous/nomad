@@ -46,11 +46,16 @@
  */
 #pragma once
 
+#include "service.h"
+
 /** Parallel browser sessions: 0-5 = web-UI tabs, 6 = the LCD browser. */
 #define NOMAD_SESSIONS    7
 #define NOMAD_LCD_SESSION 6
 
-/** Bring up the nomad task. Auto-init hook (see straddle.yaml, order 180) —
- *  run by the generated spangapInitStraddles() dispatcher after rnsd + the
- *  transports, so consumers wire nothing. */
-void nomadInit(void);
+/** Bring up the nomad task. Core boot-registered Service (see straddle.yaml) —
+ *  onInit runs on the boot task after rnsd + the transports (requires:
+ *  reticulous/rns), in all builds incl. headless, so consumers wire nothing. */
+class NomadService : public Service {
+public:
+    void onInit() override;
+};

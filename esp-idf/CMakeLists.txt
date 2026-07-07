@@ -1,7 +1,7 @@
 include(${CMAKE_CURRENT_LIST_DIR}/spangap_requires.cmake)
 # Conditional sources: esp-idf/conditional/<name>/ is compiled only when <name>
-# is staged. The on-device Nomad browser program lives in conditional/spangap-lcd/
-# and registers via the when:-gated nomadLcdRegister hook — no #if anywhere.
+# is staged. The on-device Nomad browser program (NomadApp) lives in
+# conditional/spangap-lcd/ as a when:-gated boot-registered service — no #if anywhere.
 idf_component_register(
     SRCS
         "src/nomad.cpp"

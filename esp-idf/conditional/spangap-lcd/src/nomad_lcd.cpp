@@ -33,11 +33,12 @@
  * we touch LVGL straight from the change callback.
  *
  * This whole file lives under conditional/spangap-lcd/, compiled only when the
- * lcd straddle is staged, so no #if is needed and the register fn below is a
- * when:-gated init: hook (spangap/spangap-lcd) rather than a self-call.
+ * lcd straddle is staged, so no #if is needed and NomadApp is a when:-gated
+ * boot-registered service (spangap/spangap-lcd) rather than a self-call.
  */
 #include "lcd.h"
 #include "lcd_app.h"   /* LcdApp + lcdInstall */
+#include "nomad_app.h" /* NomadApp — this straddle's services: class */
 #include "mem.h"
 #include "storage.h"
 #include "compat.h"
@@ -936,7 +937,7 @@ void openPage(const std::string& hash, const std::string& path = "") {
 }
 
 /* An LXMF message's Nomad link was tapped (lxmf_lcd wrote nomad.url_lcd).
- * Runs on the lcd task (subscribed via lcdRun in nomadLcdRegister), so LVGL is
+ * Runs on the lcd task (subscribed via lcdRun in NomadApp::appInit), so LVGL is
  * safe here. Bring the Nomad browser forward and open the page. Mirrors
  * lxmf_lcd's onLcdOpenUrl (the reverse direction). */
 void onLcdOpenPage(const char* /*key*/, const char* val) {
@@ -1355,28 +1356,30 @@ void nomadSettingsPane(void* arg) {
     }
 }
 
-/* NomadApp — onCreate builds the browser; onClose nulls the widget handles so a
- * storage change (the session subscription outlives the layer) early-returns
- * instead of touching freed objects after eviction. The persistent list/status
- * timers guard on these same handles. */
-class NomadApp : public LcdApp {
-public:
-    NomadApp() : LcdApp({ .name = "Nomad", .iconBasename = "nomad" }) {}
-    void onCreate(lv_obj_t* root) override { nomadApp(root); }
-    void onClose() override {
-        s_list = nullptr; s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr;
-        s_status = nullptr; s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
-    }
-};
-
 }  // namespace
 
-/* Register the Nomad-browser launcher program — a when:-gated init: hook
- * (spangap/spangap-lcd). This whole file lives under conditional/spangap-lcd/,
- * compiled only when the lcd straddle is staged, so no #if is needed. Plain
- * C++ linkage to match the generated dispatcher's forward decl. */
-void nomadLcdRegister(void) {
-    lcdRun([](void*) { lcdInstall(new NomadApp()); });   /* tile build is LVGL: on the lcd task */
+/* NomadApp — the Nomad-browser launcher program (declared in nomad_app.h,
+ * global so the generated services: trampoline can `new` it; methods defined
+ * here where the file-static browser state lives). onCreate builds the browser;
+ * onClose nulls the widget handles so a storage change (the session
+ * subscription outlives the layer) early-returns instead of touching freed
+ * objects after eviction. The persistent list/status timers guard on these same
+ * handles. */
+NomadApp::NomadApp() : LcdApp({ .name = "Nomad", .iconBasename = "nomad" }) {}
+
+void NomadApp::onCreate(lv_obj_t* root) { nomadApp(root); }
+
+void NomadApp::onClose() {
+    s_list = nullptr; s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr;
+    s_status = nullptr; s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
+}
+
+/* NomadApp::appInit — the boot-task half of bring-up, run once by
+ * LcdApp::onInit() right after it hops the launcher-tile install onto the lcd
+ * task. This whole file lives under conditional/spangap-lcd/, compiled only when
+ * the lcd straddle is staged, so no #if is needed — no lcd, no NomadApp, no
+ * services: registration. */
+void NomadApp::appInit() {
     lcdRegisterSettings("Mesh Network/Nomad", "Nomad Network", nomadSettingsPane, 3);
 
     /* An LXMF message's Nomad link (tapped in LXMessenger) writes nomad.url_lcd.
