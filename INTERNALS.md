@@ -231,11 +231,18 @@ pixel-parity is a non-goal.
   page bytes have no `javascript:`/`data:` URL surface — `NomadWindow.vue`
   decides what a target means.
 - **`esp-idf/conditional/spangap-lcd/src/nomad_lcd.cpp`** — Micron→LVGL, bound to
-  session 6. Chrome (header, list rows) uses Montserrat; the rendered page uses
-  the platform monospace bitmap fonts (box-drawing/column graphics need a
-  fixed-width cell), selected by `s.nomad.page_font`. fg-only lines flow as
-  spangroup spans (proper inline wrap); lines with bg colours or widgets render
-  as a flex-wrap row of styled labels. The list screen holds its order under the
+  session 6. Chrome (header, list rows) uses Montserrat; the rendered page uses a
+  fixed-width font ladder selected by `s.nomad.page_font` — the platform bitmap
+  terminal fonts at the bottom (Micro 2×3, Tom Thumb 4×6, Spleen 5×8 — the
+  default) and the vector mono sizes above (box-drawing/column graphics need a
+  fixed-width cell; the bitmaps measure glyphs by table lookup, far cheaper on
+  art pages). fg-only lines flow as spangroup spans (proper inline wrap); lines
+  with bg colours or widgets render as a flex-wrap row of styled labels.
+  Adjacent same-colour text segments are merged before emitting, and the whole
+  page is capped at 600 LVGL objects (`kRenderObjMax`) with a truncation notice
+  past it: a cell-art page colours every character cell, and an uncapped render
+  builds thousands of labels whose flex re-layout effectively never completes —
+  which, on the lcd task, once starved every same-core actor below it. The list screen holds its order under the
   operator's finger for `LIST_HOLD_MS` so announce churn doesn't reorder rows
   mid-scroll. The whole file is under `conditional/spangap-lcd/`, compiled only
   when that straddle is staged, and registers via the `when:`-gated

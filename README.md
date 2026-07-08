@@ -76,7 +76,7 @@ Frontends drive nomad entirely through the config tree. `dest_hex` is the
 | Key | Default | Meaning |
 |---|---|---|
 | `s.nomad.max_nodes` | `256` | Announced-nodes feed LRU cap; `0` = unbounded (oldest-heard node evicted when full). |
-| `s.nomad.page_font` | `1` | LCD page-font index, smallest first: `0` = Micro 2×3 (160 cols — a whole-page thumbnail), `1` = Tom Thumb 4×6 (default), `2` = Spleen 5×8. Stepped by the LCD page header's −/+ buttons. |
+| `s.nomad.page_font` | `2` | LCD page-font index, smallest first: `0` = Micro 2×3 (160 cols — a whole-page thumbnail), `1` = Tom Thumb 4×6 (80 cols), `2` = Spleen 5×8 (default), `3`–`7` = vector mono 10/12/14/16/20 px. Stepped by the LCD page header's −/+ buttons. |
 | `s.nomad.link_timeout` | `0` | Seconds a fetch Link may sit establishing before it fails. `0` lets rnsd derive the budget from the next hop's interface speed. |
 | `s.nomad.bookmarks.<id>` | — | A saved page: `<hash>[:<path>]\|<name>\|<note>` (addresses a host **and** a path). `<id>` is an opaque key (a url can't be a storage key — paths contain dots). Written via the bookmark sentinels, not by hand. |
 

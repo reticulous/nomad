@@ -42,7 +42,8 @@
 #include "mem.h"
 #include "storage.h"
 #include "compat.h"
-#include "nomad.h"   /* NOMAD_LCD_SESSION — this browser's session id */
+#include "nomad.h"
+#include "log.h"   /* NOMAD_LCD_SESSION — this browser's session id */
 
 /* Session-prefixed key/value literals. The LCD owns nomad session 6; web
  * tabs own 0-5 (see nomad.h). */
@@ -77,26 +78,40 @@ namespace {
  * platform zoom. Set by refreshChromeFont() before any UI is built; the bitmap
  * default is only a placeholder for the pre-build window. */
 const lv_font_t* kFont = &lv_font_montserrat_12_latin;
-/* Page-font ladder: all vector MONO now (was micro/tomthumb/spleen bitmaps at
- * the bottom). s.nomad.page_font persists the index; the −/+ header steppers
- * walk it. Not zoom-scaled — the ladder IS the density control. */
-const int kPageFontPx[] = { 10, 12, 14, 16, 20 };
-const int kPageFontN = (int)(sizeof(kPageFontPx) / sizeof(kPageFontPx[0]));
+/* Page-font ladder, smallest first. The bottom two steps are the platform's
+ * bitmap terminal fonts: Micro 2×3 (160 cols — the unreadable-by-design
+ * whole-page thumbnail for the oversized "graphics" some nodes draw),
+ * Tom Thumb 4×6 (80 cols — a full NomadNet page width fits unwrapped) and
+ * Spleen 5×8 (64 cols, the default). All three carry the complete box-drawing
+ * + block-element set, so micron art renders; and being bitmaps their glyph
+ * measuring is a table lookup, far cheaper than the vector engine on
+ * art-heavy pages. Above them, the vector MONO sizes. s.nomad.page_font persists the index; the −/+ header
+ * steppers walk it. Not zoom-scaled — the ladder IS the density control. */
+struct PageFontStep { const lv_font_t* bitmap; int px; };   /* bitmap set → fixed font; else vector px */
+const PageFontStep kPageFontLadder[] = {
+    { &lv_font_micro_2x3,    0 },
+    { &lv_font_tomthumb_4x6, 0 },
+    { &lv_font_spleen_5x8,   0 },
+    { nullptr, 10 }, { nullptr, 12 }, { nullptr, 14 }, { nullptr, 16 }, { nullptr, 20 },
+};
+const int kPageFontN = (int)(sizeof(kPageFontLadder) / sizeof(kPageFontLadder[0]));
 const lv_font_t* kPageFont = nullptr;   /* resolved from the index on rebuild */
 const int HDR_H = 20;
 
 int pageFontIdx() {
-    int idx = storageGetInt("s.nomad.page_font", 1);
+    int idx = storageGetInt("s.nomad.page_font", 2);   /* default: Spleen 5×8 */
     if (idx < 0) idx = 0;
     if (idx >= kPageFontN) idx = kPageFontN - 1;
     return idx;
 }
 
-/* Resolve a ladder index to a vector mono font (lcd task — created lazily). */
+/* Resolve a ladder index: a bitmap step returns its fixed font; a vector step
+ * resolves through the engine (lcd task — created lazily). */
 const lv_font_t* resolvePageFont(int idx) {
     if (idx < 0) idx = 0;
     if (idx >= kPageFontN) idx = kPageFontN - 1;
-    return lcdFont(LcdFace::MONO, kPageFontPx[idx]);
+    const PageFontStep& s = kPageFontLadder[idx];
+    return s.bitmap ? s.bitmap : lcdFont(LcdFace::MONO, s.px);
 }
 
 /* (Re)resolve the vector chrome + page fonts at the current UI zoom. Call at the
@@ -142,9 +157,20 @@ std::string printable(std::string_view in, bool oneLine, const lv_font_t* font =
     return out;
 }
 
+/* Per-render LVGL-object budget. A Micron art page colours every character
+ * cell (`Bxxx per cell), which naively becomes one label per cell — thousands
+ * of objects whose flex re-layout (with vector-font glyph measuring per pass)
+ * effectively never finishes and, on the lcd task, starves everything below
+ * it. Same-style runs are merged in addLine; this cap is the hard backstop:
+ * past it the page is truncated with a notice. */
+static int s_renderObjs = 0;
+constexpr int kRenderObjMax = 600;
+
 lv_obj_t* mkLabel(lv_obj_t* parent, const std::string& txt, lv_color_t color,
                   const lv_font_t* font = kFont) {
     lv_obj_t* l = lv_label_create(parent);
+    if (!l) return nullptr;                 /* LVGL heap exhausted — skip, don't crash */
+    s_renderObjs++;
     lv_obj_set_style_text_font(l, font, 0);
     lv_obj_set_style_text_color(l, color, 0);
     lv_label_set_text(l, txt.c_str());
@@ -627,6 +653,24 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
         lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
     };
 
+    /* Merge adjacent plain-text segments with identical colours: cell-art pages
+     * emit one segment per character cell, and each unmerged segment below
+     * becomes an LVGL span/label. Merging same-style runs collapses the common
+     * case (runs of same-coloured cells) by orders of magnitude. */
+    {
+        size_t w = 0;
+        for (size_t r = 0; r < segs.size(); r++) {
+            if (w > 0 && segs[r].kind == SEG_TEXT && segs[w - 1].kind == SEG_TEXT &&
+                segs[r].fg == segs[w - 1].fg && segs[r].bg == segs[w - 1].bg) {
+                segs[w - 1].text += segs[r].text;
+            } else {
+                if (w != r) segs[w] = std::move(segs[r]);
+                w++;
+            }
+        }
+        segs.resize(w);
+    }
+
     bool hasWidget = false, hasFg = false, hasBg = false;
     for (auto& s : segs) {
         if (s.kind != SEG_TEXT) hasWidget = true;
@@ -684,7 +728,7 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
         else {
             lv_obj_t* l = mkLabel(row, printable(s.text, true, kPageFont),
                                   s.fg != NOCOL ? lv_color_hex(s.fg) : color, kPageFont);
-            if (s.bg != NOCOL) {
+            if (l && s.bg != NOCOL) {
                 lv_obj_set_style_bg_color(l, lv_color_hex(s.bg), 0);
                 lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
             }
@@ -693,6 +737,8 @@ void addLine(lv_obj_t* parent, const std::string& line, int hlevel, MStyle& st) 
 }
 
 void renderMicron(lv_obj_t* parent, const std::string& body) {
+    int lineNo = 0;
+    s_renderObjs = 0;
     bool literal = false;
     MStyle st;             /* inline colour state persists across lines */
     std::string lit;
@@ -710,6 +756,18 @@ void renderMicron(lv_obj_t* parent, const std::string& body) {
 
     size_t pos = 0;
     while (pos <= body.size()) {
+        ++lineNo;
+        if (s_renderObjs > kRenderObjMax) {
+            warn("page too complex (%d objects at line %d) — truncated\n",
+                 s_renderObjs, lineNo);
+            lv_obj_t* l = mkLabel(parent, "… page too complex — truncated …",
+                                  lv_color_hex(0x808890), kPageFont);
+            if (l) {
+                lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+                lv_obj_set_width(l, lv_pct(100));
+            }
+            break;
+        }
         size_t nl = body.find('\n', pos);
         std::string line = body.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
         if (!line.empty() && line.back() == '\r') line.pop_back();
