@@ -21,13 +21,15 @@ import { ref, computed, watch, type ComputedRef } from 'vue'
 import { useDeviceStore } from 'spangap-browser/stores/device'
 import { useMenuStore } from 'spangap-browser/stores/menu'
 import { registerApp } from 'spangap-browser/lib/apps'
+import { registerWindowMount } from 'spangap-browser/lib/windowMounts'
 import NomadPanel from '../panels/NomadPanel.vue'
+import NomadWindow from '../panels/NomadWindow.vue'
 
 /* Visibility ref for the Nomad Browser floating window. */
 export const nomadVisible = ref(false)
 
 /** Focus nonce — bumped to raise the Nomad window even when already open.
- *  MainLayout binds it to the window's `focus-token` prop. */
+ *  the window mount binds it to the window's `focus-token` prop. */
 export const nomadFocus = ref(0)
 
 /* Menu "Nomad Browser" action: only ever show + raise, never hide. */
@@ -280,4 +282,7 @@ export function registerNomad() {
   /* Dock app — foregrounds the Nomad Browser window. */
   registerApp({ id: 'nomad', label: 'Nomad', icon: 'nomad', placement: 6,
                 open: showNomad, isOpen: () => nomadVisible.value })
+
+  registerWindowMount({ id: 'nomad', title: 'Nomad Browser', component: NomadWindow,
+                        visible: nomadVisible, focusToken: nomadFocus })
 }
