@@ -1375,8 +1375,8 @@ void nomadSettingsPane(void* arg) {
         lv_obj_set_style_bg_color(rm, lv_color_hex(0x5a2a2a), 0);
         if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), rm);
         lv_obj_t* rl = lv_label_create(rm);
-        lv_obj_set_style_text_font(rl, kFont, 0);
-        lv_label_set_text(rl, "Remove");
+        lv_obj_set_style_text_font(rl, kFont, 0);   /* symbol face is kFont's fallback */
+        lv_label_set_text(rl, LV_SYMBOL_TRASH);
         lv_obj_center(rl);
         size_t hn = b.id.size() + 1;          /* del sentinel takes the id */
         char* h = static_cast<char*>(gp_alloc(hn));
