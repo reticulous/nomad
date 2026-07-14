@@ -456,6 +456,7 @@ void followTarget(const std::string& target) {
     if (fields.empty() && vars.empty()) { navigate(hash, path); return; }
 
     /* Form submit (staged under this session's tree). */
+    storageBegin();
     storageDeleteTree("nomad.submit." NSID);
     bool wantAll = std::find(fields.begin(), fields.end(), std::string("*")) != fields.end();
     for (auto& f : s_fields) {
@@ -472,6 +473,7 @@ void followTarget(const std::string& target) {
     s_curHash = hash;
     s_curPath = path;
     storageSet("nomad.cmd.submit", (NSID "|" + hash + ":" + path).c_str());
+    storageEnd();
 }
 
 void onLinkClick(lv_event_t* e) {

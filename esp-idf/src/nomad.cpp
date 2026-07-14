@@ -260,6 +260,7 @@ static void publishPage(int sid, const std::string& hash, const std::string& pat
     std::string key = hash + ":" + path;
     if (cache) cachePut(key, body, len);   /* form-submit results aren't cached */
     char k[48];
+    storageBegin();
     sessKey(sid, "page.hash", k, sizeof k); storageSet(k, hash.c_str());
     sessKey(sid, "page.path", k, sizeof k); storageSet(k, path.c_str());
     sessKey(sid, "page.size", k, sizeof k); storageSet(k, (int)len);
@@ -283,6 +284,7 @@ static void publishPage(int sid, const std::string& hash, const std::string& pat
         storageSet(k, "");
         storageSet(kt, 1);   /* too large for the SPA; see LCD/file */
     }
+    storageEnd();
     logPage(key, body, len);
 }
 
@@ -416,9 +418,11 @@ static void startFetch(int sid, const std::string& hash, const std::string& path
         return;
     }
 
+    storageBegin();
     storageSet(k, "");
     sessKey(sid, "nav.hash", k, sizeof k); storageSet(k, hash.c_str());
     sessKey(sid, "nav.path", k, sizeof k); storageSet(k, path.c_str());
+    storageEnd();
 
     std::string key = hash + ":" + path;
     /* A bypass fetch (reload) skips the cache READ but leaves the entry in
