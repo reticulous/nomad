@@ -43,7 +43,10 @@
 static const char* TAG = "nomad";
 
 #define NOMAD_VERSION              1
-#define NOMAD_PUBLISH_INTERVAL_MS  1000
+/* Idle housekeeping cadence: the only periodic work is re-establishing a dropped
+ * announce subscription, which tolerates 5 s latency. A faster beat just caps
+ * light sleep; page serving and announces are event-driven, not on this tick. */
+#define NOMAD_PUBLISH_INTERVAL_MS  5000
 #define NOMAD_ASPECT               "nomadnetwork.node"
 #define NOMAD_FETCH_TAG            "nomad"          /* rnsdLinkOpen tag prefix: "nomad<sid>" (≤23) */
 #define NOMAD_RESP_PORT            130              /* request-response aux port */
@@ -891,7 +894,10 @@ static void cliNomad(const char* args)
 
 /* ─────────────── task ─────────────── */
 
-static TickType_t s_lastPublishTick = 0;
+static TaskHandle_t  s_task = nullptr;
+static volatile bool s_stop = false;   /* rns stop → break the work loop and park */
+static volatile bool s_parked = false; /* true while parked (stopped); nomadStop waits on it */
+static TickType_t    s_lastPublishTick = 0;
 
 static TickType_t nextDeadline(void)
 {
@@ -905,14 +911,9 @@ static void nomadTaskMain(void*)
 {
     info("[%s] task up", TAG);
 
-    /* Boot barrier: stay quiet until rns.ready — clock valid, network up (if
-     * configured), and the minimum settle floor elapsed. Bounded fallback so a
-     * wedged rnsd can't pin us. No rnsd, no
-     * point — so bail (don't start) if rns.ready never comes. */
-    if (!waitForFlag("rns.ready", 120)) {
-        err("[%s] rns.ready never set — not starting", TAG);
-        killSelf();
-    }
+    /* No boot barrier here: the RNS orchestrator only calls nomadStart() (which
+     * spawns this task) after rnsd is up and past its boot window, so the clock
+     * is resolved and the network settled by the time we run. */
 
     /* Client of rnsd (announce fanout + RNSD_PORT_LINK) + an aux-only
      * server port for request responses. itsServerInit sets up the shared
@@ -934,14 +935,6 @@ static void nomadTaskMain(void*)
      * over all rnsd.links.nomad<sid>.* trees; the handler filters .state). */
     storageSubscribeChanges("rnsd.links." NOMAD_FETCH_TAG, onLinkState);
 
-    /* Gate first contact with rnsd on a known-valid clock (or the bounded
-     * wait), like lxmf and the transports. rnsd itself only stands up its ITS
-     * server surface after the same wait, so connecting earlier just spins on
-     * "not initialised as a server" rejects for ~30 s of boot. Waiting lets us
-     * connect once, cleanly, right after rnsd comes up. */
-    waitForTime(0);
-
-    connectAnnounceSub();
     for (int i = 0; i < NOMAD_SESSIONS; i++) {
         s_sess[i].handle = -1;   /* 0 is a valid ITS handle; start unset */
         navSet(i, "idle");
@@ -949,7 +942,13 @@ static void nomadTaskMain(void*)
 
     s_lastPublishTick = xTaskGetTickCount();
 
-    for (;;) {
+  for (;;) {   /* Park, don't delete: this task lives across rns stop/start, so its
+                * ITS slot + storage subs are reused, not leaked. */
+    /* Re-establish the announce subscription on first entry and on every
+     * resume — teardown drops it on stop, so it must run here, not once. */
+    connectAnnounceSub();
+
+    while (!s_stop) {
         itsPoll(nextDeadline());
 
         TickType_t now = xTaskGetTickCount();
@@ -957,7 +956,45 @@ static void nomadTaskMain(void*)
             if (s_announce_sub_handle < 0) connectAnnounceSub();
             s_lastPublishTick = now;
         }
+    }   /* end while(!s_stop) */
+
+        /* rns stop: tear down every rnsd connection nomad holds so rnsd frees
+         * the slots. itsDisconnect fires rnsd's onDisconnect: the announce sub
+         * releases its RNSD_PORT_ANNOUNCES slot; each open session Link tears
+         * down (dropLink disconnects the RNSD_PORT_LINK handle and clears
+         * link_hash). Keep the page cache (s_cache) and sessions (s_sess,
+         * PSRAM_BSS) — the task lives, so a re-view stays zero air time. Then
+         * PARK on the inbox until nomadStart() clears s_stop and notifies. */
+        for (int i = 0; i < NOMAD_SESSIONS; i++) dropLink(i);
+        if (s_announce_sub_handle >= 0) {
+            itsDisconnect(s_announce_sub_handle);
+            s_announce_sub_handle = -1;
+        }
+        s_parked = true;
+        info("[%s] stopped", TAG);
+        while (s_stop) itsPoll(portMAX_DELAY);
+        s_parked = false;
     }
+}
+
+/* ── RNS lifecycle hooks (registered with the orchestrator; see rnsServiceRegister) ── */
+static void nomadStart(void)
+{
+    s_stop = false;
+    if (!s_task)
+        /* Core 1, prio 1, 8 KB PSRAM stack — same class as lxmf. */
+        s_task = spawnTask(nomadTaskMain, TAG, 8192, nullptr, 1, 1, STACK_PSRAM);
+    else
+        xTaskNotifyGive(s_task);   /* un-park the resident task */
+}
+
+static void nomadStop(void)
+{
+    if (!s_task || s_stop) return;
+    s_stop = true;
+    xTaskNotifyGive(s_task);   /* break the itsPoll wait; the task parks, not deleted */
+    for (int i = 0; i < 300 && !s_parked; i++) delay(10);   /* await park */
+    if (!s_parked) warn("[%s] stop timed out", TAG);
 }
 
 void NomadService::onInit()
@@ -971,8 +1008,10 @@ void NomadService::onInit()
 
     cliRegisterCmd("nomad", cliNomad);
 
-    /* Core 1, prio 1, 8 KB PSRAM stack — same class as lxmf. */
-    spawnTask(nomadTaskMain, TAG, 8192, nullptr, 1, 1, STACK_PSRAM);
+    /* Register with the RNS orchestrator instead of self-spawning: rnsStart()
+     * calls nomadStart() (which spawns nomadTaskMain) once rnsd is up and past
+     * its boot window, and rnsStop() calls nomadStop(). */
+    rnsServiceRegister(TAG, nomadStart, nomadStop);
 
     /* The on-device Nomad-browser launcher tile is a separate when:-gated
      * service (NomadApp, spangap/spangap-lcd), defined in conditional/spangap-lcd/
