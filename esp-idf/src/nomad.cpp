@@ -68,8 +68,12 @@ static const char* TAG = "nomad";
  * Larger pages fall back to the on-device LCD / RAM cache. */
 #define NOMAD_MAX_PAGE_PUBLISH     (128 * 1024)
 
-/* RNSD_PORT_ANNOUNCES frame: hops(1) | dest_hash(16) | identity_hash(16) | app_data(N) */
-constexpr size_t NOMAD_ANNOUNCE_HDR = 1 + 16 + 16;
+/* RNSD_PORT_ANNOUNCES frame:
+ *   hops(1) | dest_hash(16) | identity_hash(16) | pubkey(64) | app_data(N)
+ * The public key rides along so a subscriber can act on an announce without
+ * calling back into rnsd for the identity. */
+constexpr size_t NOMAD_ANNOUNCE_PUBKEY_OFF = 1 + 16 + 16;
+constexpr size_t NOMAD_ANNOUNCE_HDR = 1 + 16 + 16 + 64;
 constexpr size_t NOMAD_DEST_HASH_LEN = 16;
 
 /* ── helpers (local; mirror lxmf.cpp) ── */
@@ -618,6 +622,64 @@ static std::string bookmarkIdForUrl(const std::string& url)
     return f.id;
 }
 
+/* ── bookmark claims ──
+ *
+ * A bookmarked node is a destination the user chose, and the set is bounded by
+ * the bookmark list — which is exactly the condition that makes a long-lived
+ * claim in rnsd's directory legitimate. The claim keeps the node's identity and
+ * route ranked above the announce traffic of a busy public network, so opening
+ * a bookmark is immediate rather than a path request away.
+ *
+ * DIR, not DIR_BLOB: we want to know who the node is, not to answer path
+ * requests on its behalf. */
+
+/* Decode "<hash>[:<path>]|<name>|<note>" to the host hash. */
+static bool bookmarkHost(const char* key, const char* val, uint8_t dh[NOMAD_DEST_HASH_LEN])
+{
+    if (!key || !val) return false;
+    const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
+    if (std::strchr(tail, '.')) return false;
+    std::string v = val;
+    size_t bar = v.find('|');
+    if (bar == std::string::npos) return false;
+    std::string url = v.substr(0, bar);
+    return hexToDestHash(url.substr(0, url.find(':')), dh);
+}
+
+static void bmClaimLeaf(const char* key, const char* val)
+{
+    uint8_t dh[NOMAD_DEST_HASH_LEN];
+    if (!bookmarkHost(key, val, dh)) return;
+    rnsdClaim(dh, RNSD_CLAIM_NOMAD, RNSD_CLAIM_PERSIST, RNSD_CLAIM_LAYER_DIR, 0);
+}
+
+/* Re-assert every bookmarked host. Idempotent and cheap over a user-sized list,
+ * so add/delete just re-walks instead of tracking which entry changed. */
+static void bookmarksClaimAll(void)
+{
+    storageForEach("s.nomad.bookmarks.", bmClaimLeaf);
+}
+
+/* One host may be bookmarked at several paths, so a delete only releases the
+ * claim once the last bookmark naming that host is gone. */
+static uint8_t s_bmSeekHost[NOMAD_DEST_HASH_LEN];
+static bool    s_bmSeekFound;
+static void bmSeekLeaf(const char* key, const char* val)
+{
+    if (s_bmSeekFound) return;
+    uint8_t dh[NOMAD_DEST_HASH_LEN];
+    if (!bookmarkHost(key, val, dh)) return;
+    if (std::memcmp(dh, s_bmSeekHost, NOMAD_DEST_HASH_LEN) == 0) s_bmSeekFound = true;
+}
+
+static void bookmarksDropClaimIfLast(const uint8_t dh[NOMAD_DEST_HASH_LEN])
+{
+    std::memcpy(s_bmSeekHost, dh, NOMAD_DEST_HASH_LEN);
+    s_bmSeekFound = false;
+    storageForEach("s.nomad.bookmarks.", bmSeekLeaf);
+    if (!s_bmSeekFound) rnsdClaimDrop(dh, RNSD_CLAIM_NOMAD);
+}
+
 static void onCmdBookmarkAdd(const char* key, const char* val)
 {
     if (!val || !*val) return;
@@ -653,6 +715,7 @@ static void onCmdBookmarkAdd(const char* key, const char* val)
     char k[64];
     std::snprintf(k, sizeof(k), "s.nomad.bookmarks.%s", id.c_str());
     storageSet(k, (url + "|" + name + "|" + note).c_str());
+    rnsdClaim(dh, RNSD_CLAIM_NOMAD, RNSD_CLAIM_PERSIST, RNSD_CLAIM_LAYER_DIR, 0);
     info("bookmark + %s \"%s\"", url.c_str(), sanitizeForLog(name).c_str());
 }
 
@@ -672,7 +735,10 @@ static void onCmdBookmarkDel(const char* key, const char* val)
     }
     char k[64];
     std::snprintf(k, sizeof(k), "s.nomad.bookmarks.%s", v.c_str());
+    uint8_t dh[NOMAD_DEST_HASH_LEN];
+    bool had_host = bookmarkHost(k, storageGetStr(k, "").c_str(), dh);
     storageUnset(k);
+    if (had_host) bookmarksDropClaimIfLast(dh);
     info("bookmark - %s", v.c_str());
 }
 
@@ -931,6 +997,10 @@ static void nomadTaskMain(void*)
     storageSubscribeChanges("nomad.cmd.submit",        onCmdSubmit);
     storageSubscribeChanges("nomad.cmd.bookmark.add",  onCmdBookmarkAdd);
     storageSubscribeChanges("nomad.cmd.bookmark.del",  onCmdBookmarkDel);
+    /* rnsd keeps claims compiled into its persisted image, so this is usually a
+     * restamp — but a discarded image must cost only the head start, never the
+     * intent, and the bookmark list is where that intent lives. */
+    bookmarksClaimAll();
     /* Reflect each session Link's progress into its nav.status (prefix sub
      * over all rnsd.links.nomad<sid>.* trees; the handler filters .state). */
     storageSubscribeChanges("rnsd.links." NOMAD_FETCH_TAG, onLinkState);

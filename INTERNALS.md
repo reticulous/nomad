@@ -146,6 +146,18 @@ url and name must not. Re-adding an existing url updates its name/note in place
 `<id>` or a `<hash>[:<path>]` url (≥32 chars → treated as a url and resolved to
 its id). A bare host bookmark is normalised to `<hash>:/page/index.mu`.
 
+**A bookmarked host is claimed in rnsd's directory** (`rnsdClaim`, consumer
+`RNSD_CLAIM_NOMAD`, PERSIST, layer `DIR`), so its identity and route outrank the
+announce traffic of a busy public network under eviction and opening a bookmark
+is immediate rather than a path request away. The bookmark list is what bounds
+the claim population, which is the condition that makes a long-lived claim
+legitimate at all (see `rns/INTERNALS.md` §1.1.2). `DIR`, not `DIR_BLOB`: we
+want to know who the node is, not to answer path requests on its behalf.
+Add asserts the claim; delete releases it only once the last bookmark naming
+that host is gone (one host may be bookmarked at several paths); boot re-walks
+the whole list, because rnsd compiles claims into its persisted image but a
+discarded image must cost only the head start, never the intent.
+
 ## 7. NomadNet wire contract
 
 The authoritative contract is markqvist/NomadNet (**GPL-3.0** — read for the
