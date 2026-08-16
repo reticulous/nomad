@@ -164,9 +164,7 @@ and a browser tab render differently by design.
 - **SPA** — [`browser/src/modules/nomad.ts`](browser/src/modules/nomad.ts)
   (Pinia store + per-session views/RPC over the storage tree), the **"Nomad
   Browser"** floating window
-  ([`panels/NomadWindow.vue`](browser/src/panels/NomadWindow.vue)), the
-  **Settings → Nomad** panel
-  ([`panels/NomadPanel.vue`](browser/src/panels/NomadPanel.vue)), and a **Micron→HTML
+  ([`panels/NomadWindow.vue`](browser/src/panels/NomadWindow.vue)) and a **Micron→HTML
   renderer** ([`lib/micron.ts`](browser/src/lib/micron.ts)) — wide layout,
   mouse-clickable links/forms, real text selection.
 - **Device** (`spangap-lcd` staged) — the **"Nomad"** launcher app plus a
@@ -176,8 +174,14 @@ and a browser tab render differently by design.
   links and fill fields, bookmark/announced-node grouping. Inline Micron
   foreground/background colours render; bold/italic/underline style codes are
   dropped (headings are colour-emphasised, links are link-coloured + underlined).
-  A **Settings → Mesh Network → Nomad** pane (registered via
-  `lcdRegisterSettings`) carries the node-cap slider and add/remove bookmarks.
+- **Settings → Mesh Network → Nomad** is described by the `settings:` block in
+  `straddle.yaml` and appears on both surfaces: the node-cap slider and the
+  bookmark collection. The collection binds `nomad.bookmarks`, an array
+  `nomad.cpp` publishes from its own store with each row's two lines already
+  composed — the persistent form is the packed `<url>|<name>|<note>` string the
+  browser app and the CLI read, so a published view is what lets both shapes
+  coexist. Mutations go back through the `nomad.bm.*` sentinels, where the hash
+  check lives.
 
 The Micron renderer is **reticulous-local**, not in `spangap-browser`: Micron is
 a NomadNet wire format and the shared platform UI never renders it, so a parser

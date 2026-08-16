@@ -35,10 +35,12 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <utility>
+#include <cJSON.h>
 
 static const char* TAG = "nomad";
 
@@ -680,6 +682,152 @@ static void bookmarksDropClaimIfLast(const uint8_t dh[NOMAD_DEST_HASH_LEN])
     if (!s_bmSeekFound) rnsdClaimDrop(dh, RNSD_CLAIM_NOMAD);
 }
 
+/* ---- the bookmarks collection ----
+ *
+ * The persistent store stays what it has always been: an id-keyed set of packed
+ * "<url>|<name>|<note>" strings, which is what the browser app and the CLI
+ * read. A settings collection cannot bind that — it binds per-field objects —
+ * so this publishes the same set as the ephemeral array `nomad.bookmarks`,
+ * with the row text already composed. Publishing a view rather than migrating
+ * the store keeps one shape for the app and gives the settings surfaces the
+ * shape they need, and the mutations still go the other way through the
+ * nomad.bm.* sentinels, where the hash check lives.
+ *
+ * Republished on every change, which for a user-sized list is cheaper than
+ * tracking which entry moved. */
+
+struct BmRow { std::string id, url, name, note; };
+static std::vector<BmRow>* s_bmCollect = nullptr;
+
+static void bmCollectLeaf(const char* key, const char* val)
+{
+    if (!s_bmCollect || !key || !val) return;
+    const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
+    if (std::strchr(tail, '.')) return;
+    std::string v = val;
+    size_t p1 = v.find('|');
+    if (p1 == std::string::npos) return;
+    BmRow r;
+    r.id  = tail;
+    r.url = v.substr(0, p1);
+    std::string rest = v.substr(p1 + 1);
+    size_t p2 = rest.find('|');
+    r.name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
+    r.note = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
+    s_bmCollect->push_back(r);
+}
+
+static std::vector<BmRow> bookmarkRows(void)
+{
+    std::vector<BmRow> out;
+    s_bmCollect = &out;
+    storageForEach("s.nomad.bookmarks.", bmCollectLeaf);
+    s_bmCollect = nullptr;
+    return out;
+}
+
+/** Publish the bookmark set as the array the settings collection binds, with
+ *  the two lines each row shows already composed. */
+static void bookmarksPublish(void)
+{
+    std::vector<BmRow> rows = bookmarkRows();
+    cJSON* arr = cJSON_CreateArray();
+    for (const BmRow& r : rows) {
+        cJSON* o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "id",   r.id.c_str());
+        cJSON_AddStringToObject(o, "url",  r.url.c_str());
+        cJSON_AddStringToObject(o, "name", r.name.c_str());
+        cJSON_AddStringToObject(o, "note", r.note.c_str());
+        cJSON_AddStringToObject(o, "title", r.name.empty() ? "(unnamed)" : r.name.c_str());
+        /* The url, and the note after it when there is one — the second line
+         * of the row, assembled here so neither surface concatenates. */
+        std::string sub = r.url + (r.note.empty() ? "" : "  \xE2\x80\x94  " + r.note);
+        cJSON_AddStringToObject(o, "subtitle", sub.c_str());
+        cJSON_AddItemToArray(arr, o);
+    }
+    storageSetTree("nomad.bookmarks", arr);
+}
+
+static void bmError(const char* why) { storageSet("nomad.bm.error", why); }
+
+/** Accepted-mutation ack, shared by the nomad.bm.* sentinels: the open form
+ *  closes when this moves. Monotonic per boot — never a read-increment, since
+ *  reads see the committed tree behind the actor's queue. */
+static void bmAck()
+{
+    static int ack = 0;
+    storageSet("nomad.bm.done", ++ack);
+}
+
+/** Why this bookmark is unacceptable, or "" if it is fine. The one place that
+ *  decides; the add form and the item editor both land here. */
+static std::string bmRejection(const std::string& urlIn)
+{
+    std::string url = urlIn;
+    while (!url.empty() && std::isspace((unsigned char)url.front())) url.erase(0, 1);
+    while (!url.empty() && std::isspace((unsigned char)url.back()))  url.pop_back();
+    if (url.empty()) return "A bookmark needs a node hash.";
+    std::string hash = url.substr(0, url.find(':'));
+    if (hash.size() != 32) return "A node hash is exactly 32 hex characters.";
+    for (char c : hash)
+        if (!std::isxdigit((unsigned char)c)) return "A node hash is hex only.";
+    return "";
+}
+
+static void onBmAdd(const char* key, const char* val)
+{
+    if (!val || !*val) return;
+    std::string payload = val;
+    storageUnset(key);
+    cJSON* o = cJSON_Parse(payload.c_str());
+    auto str = [&](const char* f) {
+        cJSON* m = o ? cJSON_GetObjectItem(o, f) : nullptr;
+        return std::string(cJSON_IsString(m) ? m->valuestring : "");
+    };
+    std::string url = str("url"), name = str("name"), note = str("note");
+    if (o) cJSON_Delete(o);
+    std::string why = bmRejection(url);
+    if (!why.empty()) { bmError(why.c_str()); return; }
+    bmError("");
+    /* One writer for the store: hand it to the existing add path, which owns
+     * the id allocation, the default-page fill-in and the directory claim. */
+    storageSet("nomad.cmd.bookmark.add", (url + "|" + name + "|" + note).c_str());
+}
+
+static void onBmSet(const char* key, const char* val)
+{
+    if (!val || !*val) return;
+    std::string payload = val;
+    storageUnset(key);
+    cJSON* o = cJSON_Parse(payload.c_str());
+    auto str = [&](const char* f) {
+        cJSON* m = o ? cJSON_GetObjectItem(o, f) : nullptr;
+        return std::string(cJSON_IsString(m) ? m->valuestring : "");
+    };
+    std::string id = str("_id"), url = str("url"), name = str("name"), note = str("note");
+    if (o) cJSON_Delete(o);
+    char k[64];
+    std::snprintf(k, sizeof k, "s.nomad.bookmarks.%s", id.c_str());
+    if (!storageExists(k)) { bmError("That bookmark is no longer there."); return; }
+    std::string why = bmRejection(url);
+    if (!why.empty()) { bmError(why.c_str()); return; }
+    if (url.find(':') == std::string::npos) url += ":" NOMAD_DEFAULT_PAGE;
+    storageSet(k, (url + "|" + name + "|" + note).c_str());
+    bmError("");
+    bookmarksClaimAll();
+    bookmarksPublish();
+    bmAck();
+}
+
+static void onBmRemove(const char* key, const char* val)
+{
+    if (!val || !*val) return;
+    std::string id = val;
+    storageUnset(key);
+    bmError("");
+    storageSet("nomad.cmd.bookmark.del", id.c_str());
+}
+
 static void onCmdBookmarkAdd(const char* key, const char* val)
 {
     if (!val || !*val) return;
@@ -717,6 +865,8 @@ static void onCmdBookmarkAdd(const char* key, const char* val)
     storageSet(k, (url + "|" + name + "|" + note).c_str());
     rnsdClaim(dh, RNSD_CLAIM_NOMAD, RNSD_CLAIM_PERSIST, RNSD_CLAIM_LAYER_DIR, 0);
     info("bookmark + %s \"%s\"", url.c_str(), sanitizeForLog(name).c_str());
+    bookmarksPublish();
+    bmAck();
 }
 
 /* val = the bookmark id (key tail), or a "<hash>[:<path>]" url to match. */
@@ -740,6 +890,7 @@ static void onCmdBookmarkDel(const char* key, const char* val)
     storageUnset(k);
     if (had_host) bookmarksDropClaimIfLast(dh);
     info("bookmark - %s", v.c_str());
+    bookmarksPublish();
 }
 
 /* ─────────────── announce-drift feed ─────────────── */
@@ -997,6 +1148,15 @@ static void nomadTaskMain(void*)
     storageSubscribeChanges("nomad.cmd.submit",        onCmdSubmit);
     storageSubscribeChanges("nomad.cmd.bookmark.add",  onCmdBookmarkAdd);
     storageSubscribeChanges("nomad.cmd.bookmark.del",  onCmdBookmarkDel);
+
+    /* The settings collection. Its array is a published view of the store (see
+     * bookmarksPublish); its mutations come back here, where the hash check
+     * lives, and are handed to the two commands above so the store keeps one
+     * writer. */
+    storageSubscribeChanges("nomad.bm.add",    onBmAdd);
+    storageSubscribeChanges("nomad.bm.set",    onBmSet);
+    storageSubscribeChanges("nomad.bm.remove", onBmRemove);
+    bookmarksPublish();
     /* rnsd keeps claims compiled into its persisted image, so this is usually a
      * restamp — but a discarded image must cost only the head start, never the
      * intent, and the bookmark list is where that intent lives. */

@@ -35,3 +35,40 @@ services:
 # the buildable SPA via straddles.gen.ts; no web-interface edit needed.
 browser_register:
   - call: registerNomad
+
+# Declarative settings: both surfaces from one block. The bookmark list is a
+# collection over the array nomad.cpp publishes from its store (the persistent
+# form is a packed string the browser app and CLI read, so the collection binds
+# a published view of it); every mutation comes back through the nomad.bm.*
+# sentinels, where the hash check lives.
+settings:
+  - at:
+      - { id: mesh, label: "Mesh Network", short: "Mesh", order: 3 }
+      - { id: nomad, label: "Nomad Network", short: "Nomad", order: 3 }
+    rows:
+      - section: "Nomad Network"
+      - caption: "Browse Nomad Network pages (the text web over Reticulum). The browsing itself happens in the Nomad Browser app."
+      - slider: { label: "Announce-drift cap", key: "s.nomad.max_nodes", min: 32, max: 2048 }
+      - caption: "Heard nodes kept in the drift list; the oldest are evicted past the cap."
+      - list:
+          label: "Bookmarks"
+          key: nomad.bookmarks
+          id: id
+          item: "{title}"
+          subtitle: "{subtitle}"
+          empty: "No bookmarks yet. Bookmark a node from the browser window, or add one here."
+          cmd: nomad.bm
+          add:
+            - label: "Add bookmark"
+              form:
+                title: "Add bookmark"
+                submit: "Add"
+                fields:
+                  - text: { label: "Node", field: url, placeholder: "32 hex characters[:/page/index.mu]" }
+                  - text: { label: "Name", field: name }
+                  - text: { label: "Note", field: note }
+          remove: { confirm: "Remove {title}?" }
+          edit:
+            - text: { label: "Node", field: url }
+            - text: { label: "Name", field: name }
+            - text: { label: "Note", field: note }

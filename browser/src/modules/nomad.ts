@@ -22,7 +22,6 @@ import { useDeviceStore } from 'spangap-browser/stores/device'
 import { useMenuStore } from 'spangap-browser/stores/menu'
 import { registerApp } from 'spangap-browser/lib/apps'
 import { registerWindowMount } from 'spangap-browser/lib/windowMounts'
-import NomadPanel from '../panels/NomadPanel.vue'
 import NomadWindow from '../panels/NomadWindow.vue'
 
 /* Visibility ref for the Nomad Browser floating window. */
@@ -275,9 +274,6 @@ export function registerNomad() {
     showNomad()
     nomadOpenUrl.value = { hash, path: path || DEFAULT_PAGE, nonce: Date.now() }
   })
-
-  /* Settings → Mesh Network → Nomad Network (the Nomad settings panel). */
-  menu.register('settings/mesh/nomad', 'Nomad Network', { type: 'panel', component: NomadPanel }, { placement: 4 })
 
   /* Dock app — foregrounds the Nomad Browser window. */
   registerApp({ id: 'nomad', label: 'Nomad', icon: 'nomad', placement: 6,
