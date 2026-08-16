@@ -174,7 +174,7 @@ and a browser tab render differently by design.
   links and fill fields, bookmark/announced-node grouping. Inline Micron
   foreground/background colours render; bold/italic/underline style codes are
   dropped (headings are colour-emphasised, links are link-coloured + underlined).
-- **Settings → Mesh Network → Nomad** is described by the `settings:` block in
+- **Settings → Reticulum Mesh → Nomad** is described by the `settings:` block in
   `straddle.yaml` and appears on both surfaces: the node-cap slider and the
   bookmark collection. The collection binds `nomad.bookmarks`, an array
   `nomad.cpp` publishes from its own store with each row's two lines already

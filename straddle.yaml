@@ -43,7 +43,7 @@ browser_register:
 # sentinels, where the hash check lives.
 settings:
   - at:
-      - { id: mesh, label: "Mesh Network", short: "Mesh", order: 3 }
+      - { id: reticulum }
       - { id: nomad, label: "Nomad Network", short: "Nomad", order: 3 }
     rows:
       - section: "Nomad Network"
