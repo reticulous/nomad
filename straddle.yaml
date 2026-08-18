@@ -44,7 +44,7 @@ browser_register:
 settings:
   - at:
       - { id: reticulum }
-      - { id: nomad, label: "Nomad Network", short: "Nomad", order: 3 }
+      - { id: nomad, label: "Nomad Network", short: "Nomad", order: 7 }
     rows:
       - section: "Nomad Network"
       - caption: "Browse Nomad Network pages (the text web over Reticulum). The browsing itself happens in the Nomad Browser app."
