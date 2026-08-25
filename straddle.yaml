@@ -48,7 +48,7 @@ settings:
     rows:
       - section: "Nomad Network"
       - caption: "Browse Nomad Network pages (the text web over Reticulum). The browsing itself happens in the Nomad Browser app."
-      - slider: { label: "Announce-drift cap", key: "s.nomad.max_nodes", min: 32, max: 2048 }
+      - integer: { label: "Announce-drift cap", key: "s.nomad.max_nodes", min: 32, max: 2048 }
       - caption: "Heard nodes kept in the drift list; the oldest are evicted past the cap."
       - list:
           label: "Bookmarks"
