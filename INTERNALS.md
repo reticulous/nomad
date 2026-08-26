@@ -76,7 +76,10 @@ transient lingering conn never blocks a fetch).
 - **`RNSD_PORT_ANNOUNCES` (6)** — client connect with
   `rnsd_announces_connect_t` carrying the `nomadnetwork.node` aspect filter;
   rnsd delivers only matching announces as packet-mode frames
-  `hops(1) | dest_hash(16) | identity_hash(16) | app_data(N)`.
+  `hops(1) | dest_hash(16) | identity_hash(16) | pubkey(64) | ratchet(32) |
+  app_data(N)`. The ratchet is an announce field of its own (all-zero when the
+  peer advertises none), never part of `app_data`; nomad reads neither — node
+  pages ride Links, which are ephemeral both ways already.
 - **`RNSD_PORT_LINK` (10)** — one outbound Link per session via `rnsdLinkOpen`
   (tag `nomad<sid>`, ref = sid). The packet handle is unused (responses ride the
   aux port) but rnsd opens it packet-mode, so `onFetchLinkRecv` drains it

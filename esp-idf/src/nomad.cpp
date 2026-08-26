@@ -71,11 +71,14 @@ static const char* TAG = "nomad";
 #define NOMAD_MAX_PAGE_PUBLISH     (128 * 1024)
 
 /* RNSD_PORT_ANNOUNCES frame:
- *   hops(1) | dest_hash(16) | identity_hash(16) | pubkey(64) | app_data(N)
+ *   hops(1) | dest_hash(16) | identity_hash(16) | pubkey(64) | ratchet(32) |
+ *   app_data(N)
  * The public key rides along so a subscriber can act on an announce without
- * calling back into rnsd for the identity. */
+ * calling back into rnsd for the identity. The ratchet — all-zero when the
+ * peer advertises none — is an announce field of its own, not part of
+ * app_data; nothing here uses it, node pages ride Links. */
 constexpr size_t NOMAD_ANNOUNCE_PUBKEY_OFF = 1 + 16 + 16;
-constexpr size_t NOMAD_ANNOUNCE_HDR = 1 + 16 + 16 + 64;
+constexpr size_t NOMAD_ANNOUNCE_HDR = 1 + 16 + 16 + 64 + 32;
 constexpr size_t NOMAD_DEST_HASH_LEN = 16;
 
 /* ── helpers (local; mirror lxmf.cpp) ── */
