@@ -61,6 +61,34 @@
             @keyup.enter="goAddress"
           />
           <button class="nav go" title="Go" @click="goAddress">Go</button>
+          <!-- ID: identify to this node on the tab's link. Green while on;
+               the firmware re-fetches the open page as that person, and a
+               bookmark of the node keeps the choice. With more than one
+               identity to offer (or none of the LXMF ones), picking who is
+               the operator's — hence the chooser below. -->
+          <div class="idwrap">
+            <button
+              class="nav id"
+              :class="{ on: curIdentified }"
+              :disabled="!curHash"
+              :title="idTitle"
+              @click="toggleIdentify"
+            >ID</button>
+            <!-- a click anywhere else is a cancel, as a menu should be -->
+            <div v-if="idPickOpen" class="idpick-scrim" @click="idPickOpen = false" />
+            <div v-if="idPickOpen" class="idpick">
+              <div class="idpick-h">Identify as</div>
+              <button
+                v-for="i in identities" :key="i.sel"
+                class="idpick-row" :class="{ node: !i.lxmf }"
+                :title="i.hash" @click="pickIdentity(i.sel)"
+              >
+                <span class="idpick-name">{{ i.label }}</span>
+                <span class="idpick-sub mono">{{ i.hash ? shortHash(i.hash) : '—' }}</span>
+              </button>
+              <button class="idpick-row cancel" @click="idPickOpen = false">Cancel</button>
+            </div>
+          </div>
           <button
             class="nav star"
             :class="{ on: curBookmarked }"
@@ -121,8 +149,10 @@
             <div v-else-if="activeTab && activeTab.truncated" class="page-msg">
               Page is {{ activeTab.size }} bytes — too large to display here.
             </div>
+            <!-- nothing to keep on screen — a tab that has never held a page.
+                 Every other case renders the last page until the next lands. -->
             <div v-else-if="!activeTab || !activeTab.body" class="page-msg dim">
-              Pick a bookmark or node, or enter an address above.
+              {{ statusBusy ? 'Loading…' : 'Pick a bookmark or node, or enter an address above.' }}
             </div>
             <pre v-else-if="viewSource" class="page source" @scroll.passive="pokeStatus">{{ activeTab.body }}</pre>
             <div v-else ref="pageEl" class="page" v-html="pageHtml" @click="onPageClick" @scroll.passive="pokeStatus" />
@@ -134,7 +164,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, nextTick } from 'vue'
 import FloatingWindow from 'spangap-browser/components/FloatingWindow.vue'
 import { useNomad, nomadOpenUrl, DEFAULT_PAGE, WEB_SESSIONS, type NavStatus, type NomadNode, type Bookmark } from '../modules/nomad'
 import { micronToHtml } from '../lib/micron'
@@ -166,9 +196,15 @@ interface Tab {
   title: string
   history: { hash: string; path: string }[]
   histPos: number
+  /* What is ON SCREEN — the last page that arrived, kept up while the next
+   * one loads (see `stale`); a fetch never blanks it. */
   body: string
   size: number
   truncated: boolean
+  /* The page on screen is the previous URL's: this tab has navigated
+   * elsewhere and the new bytes have not landed yet. Cleared the moment they
+   * do; a reload of the same URL is never stale (it is still that page). */
+  stale: boolean
   status: NavStatus
   error: string
 }
@@ -178,7 +214,8 @@ function makeTab(sid: number): Tab {
   return {
     id: ++tabSeq, sid, hash: '', path: '', title: '',
     history: [], histPos: -1,
-    body: '', size: 0, truncated: false, status: 'idle', error: '',
+    body: '', size: 0, truncated: false, stale: false,
+    status: 'idle', error: '',
   }
 }
 
@@ -219,16 +256,18 @@ const filteredBookmarks = computed(() => {
     b.name.toLowerCase().includes(needle) || b.hash.toLowerCase().includes(needle))
 })
 
-/* Bookmark sub line: the note plus when the node was last heard on the
- * mesh (blank until an announce arrives). */
+/* Bookmark sub line: who the site is browsed as (when the ID button has
+ * spoken for it) and the note, plus when the node was last heard on the mesh
+ * (blank until an announce arrives). */
 function nodeSeen(hash: string): string {
   const n = nomad.nodes.value.find(nd => nd.hash === hash)
   return n ? `${n.hops} hops · ${age(n.lastSeen)}` : ''
 }
 function bookmarkSub(b: Bookmark): string {
-  const seen = nodeSeen(b.hash)
-  if (!b.note) return seen
-  return seen ? `${b.note} · ${seen}` : b.note
+  const who = b.ident
+    ? `as ${identities.value.find(i => i.sel === b.ident)?.label ?? b.ident}`
+    : ''
+  return [who, b.note, nodeSeen(b.hash)].filter(Boolean).join(' · ')
 }
 
 /* "On the Mesh": bookmarked nodes live in the section above (not repeated
@@ -272,6 +311,12 @@ const curHash = computed(() => activeTab.value?.hash ?? '')
 const curPath = computed(() => activeTab.value?.path || DEFAULT_PAGE)
 const curBookmarked = computed(() =>
   !!curHash.value && nomad.isBookmarked(curHash.value, curPath.value))
+/* Identification is the firmware session's — i.e. this tab's — and it follows
+ * the site the tab is on, so another tab on the same node is unaffected. */
+const curIdentified = computed(() =>
+  !!activeTab.value && nomad.session(activeTab.value.sid).identify.value)
+const curIdentifiedAs = computed(() =>
+  activeTab.value ? nomad.session(activeTab.value.sid).identifyAs.value : '')
 const pageHtml = computed(() => micronToHtml(activeTab.value?.body ?? ''))
 const canBack = computed(() => (activeTab.value?.histPos ?? -1) > 0)
 
@@ -294,9 +339,11 @@ const statusClass = computed(() => ({
   ok: activeTab.value?.status === 'done',
   bad: activeTab.value?.status === 'failed' || activeTab.value?.status === 'timeout',
 }))
+/* A failed fetch replaces the page only when what is up belongs to another
+ * URL — a failed reload leaves the page it could not refresh on screen. */
 const showError = computed(() => {
   const t = activeTab.value
-  return !!t && (t.status === 'failed' || t.status === 'timeout') && !t.body
+  return !!t && (t.status === 'failed' || t.status === 'timeout') && (!t.body || t.stale)
 })
 
 /* Status hover lifecycle: visible while loading/failed; once the page is
@@ -360,7 +407,7 @@ function activateTab(id: number) {
 function loadInto(t: Tab, hash: string, path: string) {
   t.hash = hash; t.path = path; t.title = ''
   t.history = [{ hash, path }]; t.histPos = 0
-  t.body = ''; t.size = 0; t.truncated = false
+  t.stale = true
 }
 
 /* Open a URL: foreground an existing tab with the same URL, else reuse a
@@ -399,7 +446,7 @@ function navigateInTab(hash: string, path: string) {
   t.history.push({ hash: h, path: p })
   t.histPos = t.history.length - 1
   t.hash = h; t.path = p; t.title = ''
-  t.body = ''; t.size = 0; t.truncated = false
+  t.stale = true
   fetchActive(); syncAddress()
 }
 
@@ -409,7 +456,7 @@ function back() {
   t.histPos -= 1
   const e = t.history[t.histPos]!
   t.hash = e.hash; t.path = e.path; t.title = ''
-  t.body = ''; t.size = 0; t.truncated = false
+  t.stale = true
   fetchActive(); syncAddress()
 }
 
@@ -535,7 +582,7 @@ function followTarget(target: string, newTabReq: boolean) {
     t.history.push({ hash: r.hash, path: r.path })
     t.histPos = t.history.length - 1
     t.hash = r.hash; t.path = r.path; t.title = ''
-    t.body = ''; t.size = 0; t.truncated = false
+    t.stale = true
   }
   t.status = 'path_requested'; t.error = ''
   nomad.submit(t.sid, r.hash, r.path, data)
@@ -558,6 +605,9 @@ function onPageClick(ev: MouseEvent) {
   if (target) followTarget(target, ev.ctrlKey || ev.metaKey)
 }
 
+/* ★: bookmarking while identified saves who this site is browsed as, so
+ * opening the bookmark later — in any tab, after a reboot — identifies as the
+ * same person before the first request goes out. */
 function toggleBookmark() {
   if (!curHash.value) return
   if (curBookmarked.value) {
@@ -566,9 +616,56 @@ function toggleBookmark() {
     if (bm) nomad.delBookmark(bm.id)
   } else {
     const node = nomad.nodes.value.find(n => n.hash === curHash.value)
-    nomad.addBookmark(curHash.value, curPath.value, node?.name ?? '', '')
+    nomad.addBookmark(curHash.value, curPath.value, node?.name ?? '',
+                      curIdentified.value ? curIdentifiedAs.value : '', '')
   }
 }
+
+/* ID: identify to the node this tab is on. Turning it on identifies over the
+ * link that is already up; the firmware repeats it on every link this session
+ * opens to the same node afterwards, re-fetches the open page as that person
+ * (who is asking is what a gated page answers from), and writes the choice
+ * into a bookmark of the node if there is one. Turning it off cannot unsay an
+ * identify already sent — the firmware drops that link so the re-fetch asks
+ * anonymously.
+ *
+ * One LXMF identity is the answer without asking — it is the name the far
+ * side already knows this operator by. Anything else (several to choose from,
+ * or none, leaving only the node's own identity) is a decision, so the
+ * chooser opens. */
+const idPickOpen = ref(false)
+const identities = computed(() => nomad.identities.value)
+const lxmfIdentities = computed(() => identities.value.filter(i => i.lxmf))
+
+const idTitle = computed(() => {
+  if (!curIdentified.value) return 'Identify to this node and reload the page'
+  const who = identities.value.find(i => i.sel === curIdentifiedAs.value)
+  return `Identified as ${who?.label ?? curIdentifiedAs.value} — repeated on every `
+       + 'link this tab opens to this node'
+       + (nomad.isBookmarked(curHash.value) ? ', and saved with the bookmark' : '')
+})
+
+function toggleIdentify() {
+  const t = activeTab.value
+  if (!t || !t.hash) return
+  if (curIdentified.value) { nomad.identify(t.sid, t.hash, false); return }
+  if (lxmfIdentities.value.length === 1) {
+    nomad.identify(t.sid, t.hash, true, lxmfIdentities.value[0]!.sel)
+    return
+  }
+  idPickOpen.value = true
+}
+
+function pickIdentity(sel: string) {
+  idPickOpen.value = false
+  const t = activeTab.value
+  if (!t || !t.hash) return
+  nomad.identify(t.sid, t.hash, true, sel)
+}
+
+/* A tab switch is a different session with its own answer — never carry an
+ * open chooser across it. */
+watch(activeTabId, () => { idPickOpen.value = false })
 
 /* Open requests from other apps (an LXMF message's Nomad link, via the
  * module's nomadOpenUrl channel) land in a tab like a sidebar pick. The window
@@ -580,23 +677,34 @@ watch(() => nomadOpenUrl.value, (req) => {
 /* Live mirror, one watcher per firmware session: copy the session's
  * nav/page state into whichever tab owns that sid — foreground or not, so
  * parallel fetches land in their tabs as they complete. The hash guard
- * drops stale results when the tab has since navigated elsewhere. */
+ * drops stale results when the tab has since navigated elsewhere.
+ *
+ * The page on screen is only ever REPLACED, never cleared first: the tab
+ * keeps rendering the last page it received until the bytes for the URL it
+ * is now on arrive (hash AND path must match — a page from the URL we just
+ * left is exactly what we are still showing). */
 for (let sid = 0; sid < MAX_TABS; sid++) {
   const sess = nomad.session(sid)
   watch(
     () => [sess.navStatus.value, sess.navHash.value, sess.navPath.value,
-           sess.page.value.hash, sess.page.value.body, sess.page.value.size,
-           sess.page.value.truncated, sess.navError.value],
+           sess.page.value.hash, sess.page.value.path, sess.page.value.body,
+           sess.page.value.size, sess.page.value.truncated, sess.navError.value],
     () => {
       const t = tabs.find(tb => tb.sid === sid)
       if (!t || !t.hash || sess.navHash.value !== t.hash) return
       t.status = sess.navStatus.value
       t.error = sess.navError.value
       if (sess.navPath.value) t.path = sess.navPath.value
-      if (sess.page.value.hash === t.hash) {
-        t.body = sess.page.value.body
-        t.size = sess.page.value.size
-        t.truncated = sess.page.value.truncated
+      const p = sess.page.value
+      if (p.hash === t.hash && (p.path || DEFAULT_PAGE) === (t.path || DEFAULT_PAGE)) {
+        const arrived = t.stale       /* a different page than the one up */
+        t.body = p.body
+        t.size = p.size
+        t.truncated = p.truncated
+        t.stale = false
+        /* A new page starts at its top; a reload holds the reading position. */
+        if (arrived && t.id === activeTabId.value)
+          nextTick(() => pageEl.value?.scrollTo({ top: 0 }))
       }
       if (t.id === activeTabId.value) syncAddress()
     },
@@ -659,6 +767,36 @@ for (let sid = 0; sid < MAX_TABS; sid++) {
 .nav.go { font-size: 17.5px; }
 .nav.star { font-size: 17.5px; }
 .nav.star.on { color: #ffd24a; border-color: rgba(255,210,74,0.4); }
+/* ID sits left of the star; dark green while this tab is identifying. The
+ * :hover rule above matches with the same specificity, so the lit state
+ * needs its own hover to keep the press feedback. */
+.nav.id { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; }
+.nav.id.on { background: #1e5b32; border-color: rgba(120,230,160,0.45); color: #eafff1; }
+.nav.id.on:hover:not(:disabled) { background: #277340; }
+/* The chooser hangs under the ID button, inside the bar's stacking context. */
+.idwrap { position: relative; display: flex; }
+.idpick-scrim { position: fixed; inset: 0; z-index: 19; }
+.idpick {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 20;
+  min-width: 190px; padding: 4px; border-radius: 6px;
+  background: #202020; border: 1px solid rgba(255,255,255,0.18);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+}
+.idpick-h {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+  color: #9aa0a6; padding: 3px 6px 5px;
+}
+.idpick-row {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 0; color: #e8e8e8;
+  padding: 5px 6px; border-radius: 4px; font-size: 13px;
+}
+.idpick-row:hover { background: #2f2f2f; }
+.idpick-row.node .idpick-name { color: #c8c8c8; }
+.idpick-name { display: block; }
+.idpick-sub { display: block; font-size: 11px; color: #8f959b; }
+.idpick-row.cancel { color: #9aa0a6; border-top: 1px solid rgba(255,255,255,0.08);
+                     margin-top: 3px; border-radius: 0 0 4px 4px; }
 .addr {
   flex: 1; background: #141414; border: 1px solid rgba(255,255,255,0.15);
   color: #e8e8e8; border-radius: 5px; padding: 4px 8px; min-width: 0;

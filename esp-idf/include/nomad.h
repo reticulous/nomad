@@ -22,10 +22,18 @@
  *   - `nomad.nodes.<dest_hex>`   ephemeral — announce-drift feed
  *                                (`<last_s>|<hops>|<name>`), filtered to
  *                                the nomadnetwork.node aspect.
- *   - `s.nomad.bookmarks.<id>`   persistent — `<hash>[:<path>]|<name>|<note>`
+ *   - `s.nomad.bookmarks.<id>`   persistent —
+ *                                `<hash>[:<path>]|<name>|<ident>|<note>`
  *                                (bookmarks address host AND path; <id> is
- *                                opaque — paths can't be storage keys).
+ *                                opaque — paths can't be storage keys;
+ *                                <ident> is the identity selector the site is
+ *                                browsed as, "" = anonymously).
  *   - `nomad.s<sid>.nav.*`       ephemeral — session navigation status.
+ *   - `nomad.s<sid>.identify`    ephemeral — 1 while this session identifies
+ *                                to the site it is on (the frontends' ID
+ *                                button). Per session and RAM-only; a
+ *                                bookmark of the site is what carries the
+ *                                choice across sessions and reboots.
  *   - `nomad.s<sid>.page.*`      ephemeral — session's fetched page
  *                                (hash/path/size/fetched_s/body/truncated;
  *                                the full bytes also live in the task's
@@ -36,7 +44,13 @@
  *                    key was ever left set by a dropped notify),
  *                    `nomad.cmd.submit` (`[<sid>|]<hash>:<path>`, fields
  *                    staged under `nomad.submit.<sid>.*`),
- *                    `nomad.cmd.bookmark.add` (`<hash>[:<path>]|<name>|<note>`,
+ *                    `nomad.cmd.identify` (`[<sid>|]<hash>|<0|1>[|<sel>]` —
+ *                    identify on this session's link to that site, now and on
+ *                    every link it opens to it afterwards; re-fetches the open
+ *                    page as that person and records the choice in the site's
+ *                    bookmarks),
+ *                    `nomad.cmd.bookmark.add`
+ *                    (`<hash>[:<path>]|<name>|<ident>|<note>`,
  *                    re-add of the same url updates in place),
  *                    `nomad.cmd.bookmark.del` (`<id>` or `<hash>[:<path>]`).
  *

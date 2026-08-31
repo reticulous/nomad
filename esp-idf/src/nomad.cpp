@@ -13,6 +13,13 @@
  *                    aux). Statuses → nomad.s<sid>.nav.*, page bytes →
  *                    nomad.s<sid>.page.*. Sessions are parallel browser
  *                    contexts (0-5 web tabs, 6 LCD), each holding one Link.
+ *   identify       : nomad.cmd.identify = [<sid>|]<hash>|<0|1>[|<sel>] → the
+ *                    session identifies on its Link to that site
+ *                    (rnsdLinkIdentify), now and on every link it opens to it
+ *                    afterwards, as <sel> ("lxmf<n>" | "node"). State:
+ *                    nomad.s<sid>.identify + .identify_as. The open page is
+ *                    re-fetched as that person, and a bookmark of the site
+ *                    records the choice (see bookmarks).
  *   page cache     : hash:path → bytes (RAM/PSRAM). Re-view = zero air time.
  *                    nomad.cmd.reload bypasses the cache READ; the entry
  *                    stays until fresh bytes replace it, so a failed reload
@@ -20,7 +27,11 @@
  *                    value in the sentinel (tick/time), not a constant:
  *                    a constant re-write would be swallowed by the storage
  *                    SET-dedup if a change notify was ever dropped.
- *   bookmarks      : s.nomad.bookmarks.<id> = <hash>[:<path>]|<name>|<note>.
+ *   bookmarks      : s.nomad.bookmarks.<id> =
+ *                    <hash>[:<path>]|<name>|<ident>|<note>. <ident> is the
+ *                    identify selector the site is browsed with ("" = not at
+ *                    all), so opening a bookmark identifies as whoever it was
+ *                    bookmarked with.
  */
 #include "nomad.h"
 #include "spangap.h"
@@ -149,7 +160,7 @@ static void mpStr(std::vector<uint8_t>& o, const std::string& s)
 /* ─────────────── page cache (RAM/PSRAM) ─────────────── */
 
 struct PageEntry {
-    std::string          key;        /* "<hash>:<path>" */
+    std::string          key;        /* "<sel>@<hash>:<path>" — see cacheKey */
     std::vector<uint8_t> body;
     int                  fetched_s;
 };
@@ -214,7 +225,24 @@ struct Session {
     std::string hash;       /* 32-hex target of the current request */
     std::string path;
     int         started_s;
+    /* Sites this session identifies to and as whom, and whether the open link
+     * has been identified on already. RAM only and per session: identifying
+     * is a choice made in one tab for as long as that tab is browsing, never
+     * a setting — see identSelFor(). */
+    std::vector<std::pair<std::string, std::string>> ident;   /* {hash, sel} */
+    bool        identified;
 };
+
+/* Sites remembered per session. Small on purpose: the list is one tab's
+ * "identify to this node" choices, not an address book. */
+#define NOMAD_IDENT_MAX  8
+
+/* LXMF identity slots scanned when resolving who to identify as. Higher than
+ * the four LXMF allocates today: the slots are sparse (destroying id 0 leaves
+ * id 1), a miss costs one storage read, and nomad must not carry a build
+ * dependency on lxmf for a ceiling. */
+#define NOMAD_LXMF_SLOTS 8
+
 PSRAM_BSS static Session s_sess[NOMAD_SESSIONS] = {};  /* handles set to -1 in nomadTaskMain */
 
 static bool validSid(int sid) { return sid >= 0 && sid < NOMAD_SESSIONS; }
@@ -266,10 +294,24 @@ static void logPage(const std::string& key, const uint8_t* b, size_t len)
          frag.c_str(), len > fn ? "…" : "");
 }
 
+/* The selector this session identifies to `hash` as — defined with the rest of
+ * the identify machinery below; the cache key needs it here. */
+static std::string identSelFor(const Session& s, const std::string& hash);
+
+/* Cache key. A node answers a gated page from WHO IS ASKING, so the same url
+ * fetched as two different people is two different pages: the identity the
+ * fetch rode is part of the key, and an anonymous fetch ("") can never be
+ * served the page someone's identity opened. */
+static std::string cacheKey(const std::string& sel, const std::string& hash,
+                            const std::string& path)
+{
+    return sel + "@" + hash + ":" + path;
+}
+
 static void publishPage(int sid, const std::string& hash, const std::string& path,
                         const uint8_t* body, size_t len, bool cache = true)
 {
-    std::string key = hash + ":" + path;
+    std::string key = cacheKey(identSelFor(s_sess[sid], hash), hash, path);
     if (cache) cachePut(key, body, len);   /* form-submit results aren't cached */
     char k[48];
     storageBegin();
@@ -300,6 +342,89 @@ static void publishPage(int sid, const std::string& hash, const std::string& pat
     logPage(key, body, len);
 }
 
+/* ── identify (the ID button) ──
+ *
+ * NomadNet's browser identifies on the Link so the node knows who is asking:
+ * pages behind an authentication gate, and `var.remote_identity` in a page's
+ * own markup, are answered from it. The choice belongs to the session and
+ * survives only as long as the tab browses — it is deliberately NOT a
+ * setting, so nothing here is written to `s.`.
+ *
+ * WHO WE IDENTIFY AS IS NOT WHOSE LINK IT IS. The page fetch rides rnsd's own
+ * identity (that is what a browser connection is), while the LINKIDENTIFY is
+ * signed with whichever identity the operator chose — normally an LXMF one,
+ * because that is the name a node operator already knows them by. A selector
+ * is "lxmf<n>" or "node"; it names a storage key without ever putting a
+ * secrets path in a frontend's hands. */
+
+static std::string identKeyForSel(const std::string& sel)
+{
+    /* "node" — and anything unrecognised — is this device's own identity, the
+     * one rnsd opens links with; "" tells rnsd exactly that. */
+    if (sel.size() < 5 || sel.rfind("lxmf", 0) != 0 || !std::isdigit((unsigned char)sel[4]))
+        return "";
+    int n = std::atoi(sel.c_str() + 4);
+    if (n < 0 || n >= NOMAD_LXMF_SLOTS) return "";
+    char k[48];
+    std::snprintf(k, sizeof k, "secrets.lxmf.id.%d.privkey", n);
+    return k;
+}
+
+/* An identity is on offer once its destination is up. That published key —
+ * never the secret one — is what nomad and both frontends count, so the
+ * firmware's default and the chooser's list can never disagree; the private
+ * key is rnsd's to read, from the path identKeyForSel builds. */
+static bool identSlotLive(int n)
+{
+    char k[48];
+    std::snprintf(k, sizeof k, "lxmf.id.%d.dest_hash", n);
+    char v[40] = {};
+    storageGetStr(k, v, sizeof(v), "");
+    uint8_t dh[NOMAD_DEST_HASH_LEN];
+    return hexToDestHash(v, dh);
+}
+
+/* The selector to use when a frontend names none (the CLI, an old caller):
+ * the sole LXMF identity if there is exactly one, otherwise this node's own.
+ * Anything ambiguous belongs to the operator, and the frontends ask — see the
+ * chooser in the SPA and the LCD app. */
+static std::string identDefaultSel()
+{
+    int found = -1;
+    for (int n = 0; n < NOMAD_LXMF_SLOTS; ++n) {
+        if (!identSlotLive(n)) continue;
+        if (found >= 0) return "node";      /* more than one: not ours to pick */
+        found = n;
+    }
+    if (found < 0) return "node";
+    /* One digit, because NOMAD_LXMF_SLOTS is one digit — and built by
+     * concatenation so the bound is in the code rather than in a comment a
+     * format string cannot see. */
+    return std::string("lxmf") + (char)('0' + (found % 10));
+}
+
+/* The selector this session identifies to `hash` as, or "" for not at all. */
+static std::string identSelFor(const Session& s, const std::string& hash)
+{
+    for (auto& e : s.ident) if (e.first == hash) return e.second;
+    return "";
+}
+
+/* nomad.s<sid>.identify — "1" while THIS session identifies to the site it is
+ * on, which is what the frontends light the button from; .identify_as carries
+ * the selector so a frontend can name who. Published against a hash rather
+ * than derived from nav.hash: startFetch publishes for the page it is about
+ * to fetch, before nav.hash means anything. */
+static void identPublish(int sid, const std::string& hash)
+{
+    std::string sel = identSelFor(s_sess[sid], hash);
+    char k[48];
+    sessKey(sid, "identify", k, sizeof k);
+    storageSet(k, sel.empty() ? 0 : 1);
+    sessKey(sid, "identify_as", k, sizeof k);
+    storageSet(k, sel.c_str());
+}
+
 /* Close a session's open link + free our ITS conn. Closing our handle
  * tears the Link down in rnsd (onLinkDisconnect) and frees the slot + tag;
  * itsConnect is synchronous + FIFO-after, so a same-tag reopen right after
@@ -309,6 +434,7 @@ static void dropLink(int sid)
     Session& s = s_sess[sid];
     if (s.handle >= 0) { itsDisconnect(s.handle); s.handle = -1; }
     s.link_hash.clear();
+    s.identified = false;    /* the next link identifies itself */
 }
 
 /* A request concluded. On success keep the link open for same-node reuse;
@@ -335,6 +461,7 @@ static void onFetchLinkDisc(int ref)
     if (!validSid(ref)) return;
     s_sess[ref].handle = -1;
     s_sess[ref].link_hash.clear();
+    s_sess[ref].identified = false;
 }
 
 /* ─────────────── request-response aux (rnsd → nomad, NOMAD_RESP_PORT) ─────────────── */
@@ -412,6 +539,11 @@ static void onLinkState(const char* key, const char* val)
 
 /* ─────────────── navigate ─────────────── */
 
+/* Bookmarks carry the identify selector their site is browsed with; defined
+ * in the bookmarks section below, and all navigation needs of it. */
+static std::string bookmarkIdentFor(const std::string& hash);
+static void        bookmarkSetIdent(const std::string& hash, const std::string& sel);
+
 /* Fetch a page (packed == nullptr → GET) or submit a form (packed == the
  * msgpack {field_*,var_*} map) on session `sid`. Submits bypass the cache
  * and aren't cached. */
@@ -430,13 +562,30 @@ static void startFetch(int sid, const std::string& hash, const std::string& path
         return;
     }
 
+    /* A bookmark of this site carries the identity it is browsed with, so
+     * opening one identifies as that person from the first request — the
+     * session picks the selector up here, before identPublish lights the
+     * button and before the LINKIDENTIFY below. The session's own choice
+     * wins: turning ID off clears the bookmark too, so the two never
+     * disagree. */
+    if (identSelFor(s, hash).empty()) {
+        std::string bmsel = bookmarkIdentFor(hash);
+        if (!bmsel.empty()) {
+            if (s.ident.size() >= NOMAD_IDENT_MAX) s.ident.erase(s.ident.begin());
+            s.ident.push_back({ hash, bmsel });
+        }
+    }
+
     storageBegin();
     storageSet(k, "");
     sessKey(sid, "nav.hash", k, sizeof k); storageSet(k, hash.c_str());
     sessKey(sid, "nav.path", k, sizeof k); storageSet(k, path.c_str());
+    identPublish(sid, hash);      /* the ID button follows the site we open */
     storageEnd();
 
-    std::string key = hash + ":" + path;
+    /* Keyed by who this session asks as: the identity seeded above is the one
+     * the fetch would ride, so the hit is a page fetched as that same person. */
+    std::string key = cacheKey(identSelFor(s, hash), hash, path);
     /* A bypass fetch (reload) skips the cache READ but leaves the entry in
      * place: fresh bytes replace it on arrival (cachePut refreshes), and if
      * the refetch fails the old copy survives — Back still shows it. */
@@ -480,6 +629,18 @@ static void startFetch(int sid, const std::string& hash, const std::string& path
         }
         s.handle    = h;
         s.link_hash = hash;
+    }
+    /* Identify BEFORE the request, while the link is still coming up: rnsd
+     * holds both and runs them in this order at establishment, so a node that
+     * gates the page on who is asking has the identity when the request
+     * lands. Once per link — a second LINKIDENTIFY tells the peer nothing it
+     * does not already know. */
+    if (!s.identified) {
+        std::string sel = identSelFor(s, hash);
+        if (!sel.empty()) {
+            if (rnsdLinkIdentify(tag, identKeyForSel(sel).c_str())) s.identified = true;
+            else warn("s%d: identify to %s as %s failed", sid, hash.c_str(), sel.c_str());
+        }
     }
     /* rnsd holds the request until the Link is ACTIVE, then issues it (or, on
      * reuse, issues it immediately); a link failure fails the request back to
@@ -543,6 +704,86 @@ static void onCmdReload(const char* key, const char* val)
     startFetch(sid, hash, path, /*bypass_cache=*/true);
 }
 
+/* nomad.cmd.identify = "[<sid>|]<hash>|<0|1>[|<sel>]", sel = "lxmf<n>" or
+ * "node" (absent → identDefaultSel()). Turning it on identifies on the
+ * session's open link to that site straight away — the button acts on the
+ * page you are looking at — and every link this session opens to it later.
+ * Turning it off cannot unsay an identify already sent; it stops the next
+ * link from repeating it, and the link that already spoke is dropped so the
+ * very next fetch is a fresh anonymous one.
+ *
+ * The page in front of the operator is then re-fetched (cache bypassed) as
+ * whoever they now are: who is asking is exactly what a gated page answers
+ * from, so the button would otherwise leave a page on screen that no longer
+ * matches its own state. A bookmark of the site records the choice. */
+static void onCmdIdentify(const char* key, const char* val)
+{
+    if (!val || !*val) return;
+    std::string cmd = val;
+    storageUnset(key);
+    int sid = parseSid(cmd);
+
+    /* "<hash>|<0|1>[|<sel>]" — split from the left; the hash is fixed-width
+     * and neither of the other two fields can contain a bar. */
+    size_t b1 = cmd.find('|');
+    if (b1 == std::string::npos) { warn("s%d identify: malformed", sid); return; }
+    std::string hash = cmd.substr(0, b1);
+    std::string rest = cmd.substr(b1 + 1);
+    size_t b2 = rest.find('|');
+    bool on = rest.substr(0, b2) != "0";
+    std::string sel = (b2 == std::string::npos) ? "" : rest.substr(b2 + 1);
+    if (sel.empty()) sel = identDefaultSel();
+
+    uint8_t dh[NOMAD_DEST_HASH_LEN];
+    if (!hexToDestHash(hash, dh)) {
+        warn("s%d identify: bad hash %s", sid, hash.c_str());
+        return;
+    }
+
+    Session& s = s_sess[sid];
+    auto it = s.ident.begin();
+    while (it != s.ident.end() && it->first != hash) ++it;
+    if (on) {
+        if (it == s.ident.end()) {
+            if (s.ident.size() >= NOMAD_IDENT_MAX) s.ident.erase(s.ident.begin());
+            s.ident.push_back({ hash, sel });
+        } else {
+            /* Re-choosing on a site we already identify to: the new identity
+             * is a different person as far as the node is concerned, so the
+             * next link says so even though this one already spoke. */
+            if (it->second != sel) { it->second = sel; s.identified = false; }
+        }
+    } else if (it != s.ident.end()) {
+        s.ident.erase(it);
+    }
+    identPublish(sid, hash);
+    bookmarkSetIdent(hash, on ? sel : "");   /* the site's bookmarks remember */
+
+    /* Act on the link that is up right now, if it is to this site. */
+    if (on && !s.identified && s.handle >= 0 && s.link_hash == hash) {
+        char tag[16];
+        sessTag(sid, tag);
+        if (rnsdLinkIdentify(tag, identKeyForSel(sel).c_str())) s.identified = true;
+        else warn("s%d identify: rnsdLinkIdentify failed", sid);
+    }
+    info("s%d identify %s as %s: %s", sid, hash.c_str(), sel.c_str(),
+         on ? "on" : "off");
+
+    /* Re-fetch the open page as who we now are. Off drops the identified link
+     * first — an identify already sent cannot be unsaid, so only a fresh link
+     * asks anonymously again. */
+    char kn[48], navHash[64] = {}, navPath[128] = {};
+    sessKey(sid, "nav.hash", kn, sizeof kn);
+    storageGetStr(kn, navHash, sizeof(navHash), "");
+    sessKey(sid, "nav.path", kn, sizeof kn);
+    storageGetStr(kn, navPath, sizeof(navPath), NOMAD_DEFAULT_PAGE);
+    if (hash == navHash) {
+        if (!on) dropLink(sid);
+        startFetch(sid, hash, navPath[0] ? navPath : NOMAD_DEFAULT_PAGE,
+                   /*bypass_cache=*/true);
+    }
+}
+
 /* Form submit. The frontend stages the field values under
  * `nomad.submit.<field_*|var_*>` (keys are already the NomadNet map keys),
  * then writes `nomad.cmd.submit = "<hash>:<path>"`. We pack those k/v into
@@ -597,13 +838,62 @@ static void onCmdSubmit(const char* key, const char* val)
 
 /* ─────────────── bookmarks ───────────────
  *
- * s.nomad.bookmarks.<id> = "<hash>[:<path>]|<name>|<note>"
+ * s.nomad.bookmarks.<id> = "<hash>[:<path>]|<name>|<ident>|<note>"
  *
  * Bookmarks address a host AND a path (page bookmarks, not just nodes), so
  * the key is an opaque id (unix seconds, de-collided) — the url can't be a
  * storage key (paths contain dots). The note is last and may contain '|';
- * the url and name must not. Re-adding an existing url updates its
- * name/note in place. */
+ * the url, name and ident must not. Re-adding an existing url updates its
+ * fields in place.
+ *
+ * <ident> is the identify selector ("lxmf<n>" | "node"; "" = browse
+ * anonymously) the site is opened with — the ID button's choice made durable,
+ * so a bookmarked site is browsed as the same person after a reboot. It is a
+ * property of the host, not of the page, so every bookmark naming a host
+ * carries the same value (bookmarkSetIdent writes them all). */
+
+/* The name the node last announced ("" = never heard, or announces none);
+ * defined with the announced-nodes feed below. */
+static std::string announcedName(const std::string& hash);
+
+/* The four fields of a packed bookmark value; false = not a bookmark row. */
+struct BmVal { std::string url, name, ident, note; };
+static bool bmParse(const std::string& v, BmVal& out)
+{
+    size_t p1 = v.find('|');
+    if (p1 == std::string::npos) return false;
+    out.url = v.substr(0, p1);
+    std::string rest = v.substr(p1 + 1);
+    size_t p2 = rest.find('|');
+    out.name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
+    rest     = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
+    size_t p3 = rest.find('|');
+    out.ident = (p3 == std::string::npos) ? rest : rest.substr(0, p3);
+    out.note  = (p3 == std::string::npos) ? ""   : rest.substr(p3 + 1);
+    return true;
+}
+
+/* '|' separates the fields, so only the note (last) may hold one. Folded here
+ * rather than trusted to every writer: a bookmark name is a node's announced
+ * display name, which is remote input — a bar in it would shift every field
+ * after it, and the field after the name is who we identify to that node as. */
+static std::string bmField(std::string s)
+{
+    for (char& c : s) if (c == '|') c = '/';
+    return s;
+}
+
+static std::string bmPack(const BmVal& b)
+{
+    return bmField(b.url) + "|" + bmField(b.name) + "|" + bmField(b.ident)
+         + "|" + b.note;
+}
+
+/* The host half of a bookmark url. */
+static std::string bmHostOf(const std::string& url)
+{
+    return url.substr(0, url.find(':'));
+}
 
 struct BmFind { std::string url; std::string id; };
 static BmFind* s_bmFind = nullptr;
@@ -699,7 +989,7 @@ static void bookmarksDropClaimIfLast(const uint8_t dh[NOMAD_DEST_HASH_LEN])
  * Republished on every change, which for a user-sized list is cheaper than
  * tracking which entry moved. */
 
-struct BmRow { std::string id, url, name, note; };
+struct BmRow { std::string id; BmVal v; };
 static std::vector<BmRow>* s_bmCollect = nullptr;
 
 static void bmCollectLeaf(const char* key, const char* val)
@@ -707,16 +997,9 @@ static void bmCollectLeaf(const char* key, const char* val)
     if (!s_bmCollect || !key || !val) return;
     const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
     if (std::strchr(tail, '.')) return;
-    std::string v = val;
-    size_t p1 = v.find('|');
-    if (p1 == std::string::npos) return;
     BmRow r;
-    r.id  = tail;
-    r.url = v.substr(0, p1);
-    std::string rest = v.substr(p1 + 1);
-    size_t p2 = rest.find('|');
-    r.name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
-    r.note = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
+    if (!bmParse(val, r.v)) return;
+    r.id = tail;
     s_bmCollect->push_back(r);
 }
 
@@ -738,17 +1021,77 @@ static void bookmarksPublish(void)
     for (const BmRow& r : rows) {
         cJSON* o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "id",   r.id.c_str());
-        cJSON_AddStringToObject(o, "url",  r.url.c_str());
-        cJSON_AddStringToObject(o, "name", r.name.c_str());
-        cJSON_AddStringToObject(o, "note", r.note.c_str());
-        cJSON_AddStringToObject(o, "title", r.name.empty() ? "(unnamed)" : r.name.c_str());
+        cJSON_AddStringToObject(o, "url",  r.v.url.c_str());
+        cJSON_AddStringToObject(o, "name", r.v.name.c_str());
+        cJSON_AddStringToObject(o, "note", r.v.note.c_str());
+        cJSON_AddStringToObject(o, "title", r.v.name.empty() ? "(unnamed)" : r.v.name.c_str());
         /* The url, and the note after it when there is one — the second line
          * of the row, assembled here so neither surface concatenates. */
-        std::string sub = r.url + (r.note.empty() ? "" : "  \xE2\x80\x94  " + r.note);
+        std::string sub = r.v.url + (r.v.note.empty() ? "" : "  \xE2\x80\x94  " + r.v.note);
         cJSON_AddStringToObject(o, "subtitle", sub.c_str());
         cJSON_AddItemToArray(arr, o);
     }
     storageSetTree("nomad.bookmarks", arr);
+}
+
+/* ── the identify selector a bookmarked site is browsed with ──
+ *
+ * Read on every fetch (startFetch) and written by the ID button
+ * (onCmdIdentify). Both walk the whole list: it is user-sized, both are
+ * user actions, and one writer for the store beats a second index of it. */
+
+static std::string bookmarkIdentFor(const std::string& hash)
+{
+    for (const BmRow& r : bookmarkRows())
+        if (bmHostOf(r.v.url) == hash && !r.v.ident.empty()) return r.v.ident;
+    return "";
+}
+
+/* ── a bookmark's name follows the node's ──
+ *
+ * The name in a bookmark is a copy of an announce: a node bookmarked before it
+ * was ever heard has none to show, and one that renames itself would keep the
+ * old name for good — the display name is the node's to change, and a path
+ * request answered by an announce is exactly when the good one arrives.
+ *
+ * So an announce renames every bookmark of the host whose name is still the
+ * one the node gave itself — `was`, what the feed held before this announce —
+ * or is empty. A name that matches neither is one the operator typed in the
+ * settings form, and no announce overwrites that. An announce with no name
+ * renames nothing: silence is not a new name. */
+static void bookmarkFollowName(const std::string& hash, const std::string& was,
+                               const std::string& now)
+{
+    if (now.empty()) return;
+    bool changed = false;
+    for (BmRow& r : bookmarkRows()) {
+        if (bmHostOf(r.v.url) != hash || r.v.name == now) continue;
+        if (!r.v.name.empty() && r.v.name != was) continue;   /* the operator's */
+        r.v.name = now;
+        char k[64];
+        std::snprintf(k, sizeof k, "s.nomad.bookmarks.%s", r.id.c_str());
+        storageSet(k, bmPack(r.v).c_str());
+        changed = true;
+    }
+    if (!changed) return;
+    info("bookmark ~ %s \"%s\"", hash.c_str(), sanitizeForLog(now).c_str());
+    bookmarksPublish();
+}
+
+/* Collect first, write after: storageForEach must not see the tree mutate
+ * under it. `sel` empty = this site is browsed anonymously again. */
+static void bookmarkSetIdent(const std::string& hash, const std::string& sel)
+{
+    bool changed = false;
+    for (BmRow& r : bookmarkRows()) {
+        if (bmHostOf(r.v.url) != hash || r.v.ident == sel) continue;
+        r.v.ident = sel;
+        char k[64];
+        std::snprintf(k, sizeof k, "s.nomad.bookmarks.%s", r.id.c_str());
+        storageSet(k, bmPack(r.v).c_str());
+        changed = true;
+    }
+    if (changed) bookmarksPublish();
 }
 
 static void bmError(const char* why) { storageSet("nomad.bm.error", why); }
@@ -793,8 +1136,11 @@ static void onBmAdd(const char* key, const char* val)
     if (!why.empty()) { bmError(why.c_str()); return; }
     bmError("");
     /* One writer for the store: hand it to the existing add path, which owns
-     * the id allocation, the default-page fill-in and the directory claim. */
-    storageSet("nomad.cmd.bookmark.add", (url + "|" + name + "|" + note).c_str());
+     * the id allocation, the default-page fill-in and the directory claim.
+     * A bookmark typed into the settings form identifies as whoever the site's
+     * other bookmarks do — nobody, unless the ID button has spoken for it. */
+    BmVal b{ url, name, bookmarkIdentFor(bmHostOf(url)), note };
+    storageSet("nomad.cmd.bookmark.add", bmPack(b).c_str());
 }
 
 static void onBmSet(const char* key, const char* val)
@@ -815,7 +1161,11 @@ static void onBmSet(const char* key, const char* val)
     std::string why = bmRejection(url);
     if (!why.empty()) { bmError(why.c_str()); return; }
     if (url.find(':') == std::string::npos) url += ":" NOMAD_DEFAULT_PAGE;
-    storageSet(k, (url + "|" + name + "|" + note).c_str());
+    /* The identify selector is not a form field — it is the ID button's — so
+     * an edit of the text fields carries it across untouched. */
+    BmVal old;
+    bmParse(storageGetStr(k, ""), old);
+    storageSet(k, bmPack({ url, name, old.ident, note }).c_str());
     bmError("");
     bookmarksClaimAll();
     bookmarksPublish();
@@ -836,21 +1186,20 @@ static void onCmdBookmarkAdd(const char* key, const char* val)
     if (!val || !*val) return;
     std::string cmd = val;
     storageUnset(key);
-    /* "<hash>[:<path>]|<name>|<note>" — note may contain '|' (it's last). */
-    size_t p1 = cmd.find('|');
-    if (p1 == std::string::npos) { warn("bookmark add: need <hash>[:<path>]|<name>[|<note>]"); return; }
-    std::string url = cmd.substr(0, p1);
-    std::string hash = url.substr(0, url.find(':'));
+    /* "<hash>[:<path>]|<name>|<ident>|<note>" — note may contain '|' (last). */
+    BmVal b;
+    if (!bmParse(cmd, b)) { warn("bookmark add: need <hash>[:<path>]|<name>|<ident>[|<note>]"); return; }
+    std::string hash = bmHostOf(b.url);
     uint8_t dh[NOMAD_DEST_HASH_LEN];
     if (!hexToDestHash(hash, dh)) { warn("bookmark add: bad hash"); return; }
-    if (url.find(':') == std::string::npos)
-        url += ":" NOMAD_DEFAULT_PAGE;             /* bare host → index page */
-    std::string rest = cmd.substr(p1 + 1);
-    size_t p2 = rest.find('|');
-    std::string name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
-    std::string note = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
+    if (b.url.find(':') == std::string::npos)
+        b.url += ":" NOMAD_DEFAULT_PAGE;           /* bare host → index page */
+    /* No name given (the CLI, a settings form left blank): the node's own is
+     * the one to start from — and being the announced name, a later announce
+     * still keeps it current (bookmarkFollowName). */
+    if (b.name.empty()) b.name = announcedName(hash);
 
-    std::string id = bookmarkIdForUrl(url);        /* re-add = update in place */
+    std::string id = bookmarkIdForUrl(b.url);      /* re-add = update in place */
     if (id.empty()) {
         char idb[16];
         int t = nowUnixS();
@@ -865,9 +1214,10 @@ static void onCmdBookmarkAdd(const char* key, const char* val)
     }
     char k[64];
     std::snprintf(k, sizeof(k), "s.nomad.bookmarks.%s", id.c_str());
-    storageSet(k, (url + "|" + name + "|" + note).c_str());
+    storageSet(k, bmPack(b).c_str());
     rnsdClaim(dh, RNSD_CLAIM_NOMAD, RNSD_CLAIM_PERSIST, RNSD_CLAIM_LAYER_DIR, 0);
-    info("bookmark + %s \"%s\"", url.c_str(), sanitizeForLog(name).c_str());
+    info("bookmark + %s \"%s\"%s%s", b.url.c_str(), sanitizeForLog(b.name).c_str(),
+         b.ident.empty() ? "" : " as ", b.ident.c_str());
     bookmarksPublish();
     bmAck();
 }
@@ -907,6 +1257,21 @@ static std::string buildNodeValue(const NodeEntry& e)
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%d|%d|", e.last_s, e.hops);
     return std::string(buf) + e.name;   /* name last — may contain '|' */
+}
+
+/* The name field of a "<last_s>|<hops>|<name>" feed leaf. */
+static std::string nodeValueName(const std::string& v)
+{
+    size_t p1 = v.find('|');
+    size_t p2 = p1 == std::string::npos ? p1 : v.find('|', p1 + 1);
+    return p2 == std::string::npos ? "" : v.substr(p2 + 1);
+}
+
+static std::string announcedName(const std::string& hash)
+{
+    char k[64];
+    std::snprintf(k, sizeof k, "nomad.nodes.%s", hash.c_str());
+    return nodeValueName(storageGetStr(k, ""));
 }
 
 /* nomad.nodes.<hex> LRU eviction by last_s, capped at s.nomad.max_nodes. */
@@ -961,6 +1326,11 @@ static void onAnnounceFromRnsd(int handle, size_t /*bytesAvail*/)
     char key[64];
     std::snprintf(key, sizeof(key), "nomad.nodes.%s", dh_hex.c_str());
 
+    /* What the feed held before this announce: its name is what a bookmark of
+     * this node would have copied, which is how bookmarkFollowName tells an
+     * auto-filled bookmark name from one the operator typed. */
+    std::string was = nodeValueName(storageGetStr(key, ""));
+
     bool is_new = !storageExists(key);
     if (is_new) {
         int max_nodes = storageGetInt("s.nomad.max_nodes", 256);
@@ -980,6 +1350,9 @@ static void onAnnounceFromRnsd(int handle, size_t /*bytesAvail*/)
     storageSet(key, buildNodeValue(e).c_str());
     verb("node %s name=\"%s\" hops=%d", dh_hex.c_str(),
          sanitizeForLog(name).c_str(), hops);
+    /* Heard for the first time (a path request answered, say) or renamed: the
+     * node's bookmarks carry a copy of this name, so they follow it. */
+    if (name != was) bookmarkFollowName(dh_hex, was, name);
 }
 
 static void onAnnounceSubDisconnect(int /*handle*/)
@@ -1027,16 +1400,13 @@ static void bookmarkListLeaf(const char* key, const char* val)
 {
     const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
     if (std::strchr(tail, '.')) return;
-    /* "<hash>[:<path>]|<name>|<note>" */
-    std::string v = val ? val : "";
-    size_t p1 = v.find('|');
-    std::string url  = (p1 == std::string::npos) ? v : v.substr(0, p1);
-    std::string rest = (p1 == std::string::npos) ? "" : v.substr(p1 + 1);
-    size_t p2 = rest.find('|');
-    std::string name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
-    std::string note = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
-    cliPrintf("%-10s  %s  %s%s%s\n", tail, url.c_str(), sanitizeForLog(name).c_str(),
-              note.empty() ? "" : "  — ", sanitizeForLog(note).c_str());
+    BmVal b;
+    if (!bmParse(val ? val : "", b)) return;
+    std::string extra;
+    if (!b.ident.empty()) extra += "  [as " + b.ident + "]";
+    if (!b.note.empty())  extra += "  — " + sanitizeForLog(b.note);
+    cliPrintf("%-10s  %s  %s%s\n", tail, b.url.c_str(),
+              sanitizeForLog(b.name).c_str(), extra.c_str());
 }
 
 static void cliNomad(const char* args)
@@ -1086,7 +1456,10 @@ static void cliNomad(const char* args)
         while (*rest == ' ') rest++;
         if (strncmp(rest, "add", 3) == 0) {
             rest += 3; while (*rest == ' ') rest++;
-            /* "<hash> <name>[ <note>]" → cmd "<hash>|<name>|<note>" */
+            /* "<hash> <name>[ <note>]" → cmd "<hash>|<name>|<ident>|<note>".
+             * The CLI names no identity: a bookmark added here inherits the
+             * one the site's other bookmarks carry, and otherwise browses
+             * anonymously until the ID button says otherwise. */
             std::string r = rest;
             size_t sp = r.find(' ');
             if (sp == std::string::npos) { cliPrintf("usage: nomad bookmark add <hash> <name>[ <note>]\n"); return; }
@@ -1095,7 +1468,8 @@ static void cliNomad(const char* args)
             std::string name = tail, note;
             size_t sp2 = tail.find(' ');
             if (sp2 != std::string::npos) { name = tail.substr(0, sp2); note = tail.substr(sp2 + 1); }
-            storageSet("nomad.cmd.bookmark.add", (hash + "|" + name + "|" + note).c_str());
+            BmVal b{ hash, name, bookmarkIdentFor(bmHostOf(hash)), note };
+            storageSet("nomad.cmd.bookmark.add", bmPack(b).c_str());
             cliPrintf("nomad bookmark add: queued\n");
             return;
         }
@@ -1149,6 +1523,7 @@ static void nomadTaskMain(void*)
     storageSubscribeChanges("nomad.cmd.go",            onCmdGo);
     storageSubscribeChanges("nomad.cmd.reload",        onCmdReload);
     storageSubscribeChanges("nomad.cmd.submit",        onCmdSubmit);
+    storageSubscribeChanges("nomad.cmd.identify",      onCmdIdentify);
     storageSubscribeChanges("nomad.cmd.bookmark.add",  onCmdBookmarkAdd);
     storageSubscribeChanges("nomad.cmd.bookmark.del",  onCmdBookmarkDel);
 
@@ -1171,6 +1546,9 @@ static void nomadTaskMain(void*)
     for (int i = 0; i < NOMAD_SESSIONS; i++) {
         s_sess[i].handle = -1;   /* 0 is a valid ITS handle; start unset */
         navSet(i, "idle");
+        char k[48];              /* the keys exist from boot; no blank button */
+        sessKey(i, "identify", k, sizeof k);    storageSet(k, 0);
+        sessKey(i, "identify_as", k, sizeof k); storageSet(k, "");
     }
 
     s_lastPublishTick = xTaskGetTickCount();

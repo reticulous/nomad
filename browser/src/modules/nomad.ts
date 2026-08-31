@@ -10,12 +10,14 @@
  * owns sessions 0..WEB_SESSIONS-1 (one per tab); the LCD owns session 6.
  *
  *   nomad.nodes.<hex>        "<last_s>|<hops>|<name>"   announce drift
- *   s.nomad.bookmarks.<id>   "<hash>[:<path>]|<name>|<note>"  persistent
+ *   s.nomad.bookmarks.<id>   "<hash>[:<path>]|<name>|<ident>|<note>"  persistent
  *   nomad.s<sid>.nav.{status,hash,path,error}           session nav state
  *   nomad.s<sid>.page.{hash,path,size,body,truncated,fetched_s}
+ *   nomad.s<sid>.identify    1 = this session identifies to the site it is on
+ *   nomad.s<sid>.identify_as who it identifies as ("lxmf<n>" | "node")
  *   cmd: nomad.cmd.go=<sid>|<hash>[:<path>] / .reload=<sid>|<unique>
  *        / .submit=<sid>|<hash>:<path> (fields under nomad.submit.<sid>.*)
- *        / .bookmark.add / .bookmark.del
+ *        / .identify=<sid>|<hash>|<0|1>[|<sel>] / .bookmark.add / .bookmark.del
  */
 import { ref, computed, watch, type ComputedRef } from 'vue'
 import { useDeviceStore } from 'spangap-browser/stores/device'
@@ -57,6 +59,11 @@ export interface Bookmark {
   hash: string
   path: string
   name: string
+  /** Identity selector this site is browsed as ("lxmf<n>" | "node"; '' =
+   *  anonymously) — the ID button's choice, made durable. The firmware seeds
+   *  the session from it on every fetch, so opening a bookmark identifies
+   *  before the first request goes out. */
+  ident: string
   note: string
 }
 
@@ -92,6 +99,20 @@ export interface NomadSession {
   navPath: ComputedRef<string>
   navError: ComputedRef<string>
   busy: ComputedRef<boolean>
+  /** This session identifies to the site it is on (the ID button). */
+  identify: ComputedRef<boolean>
+  /** Who it identifies as — an Identity `sel` ("lxmf<n>" | "node"); '' = off. */
+  identifyAs: ComputedRef<string>
+}
+
+/** One identity this device can identify to a node as. `sel` is what the
+ *  firmware takes (`lxmf<n>` / `node`) — a selector, never a key path: the
+ *  private keys live under `secrets.*` and never reach a browser. */
+export interface NomadIdentity {
+  sel: string
+  label: string
+  hash: string     /* destination/identity hash, for the second line */
+  lxmf: boolean
 }
 
 export interface UseNomad {
@@ -105,8 +126,19 @@ export interface UseNomad {
    *  keys (`field_<name>` / `var_<name>`); staged under nomad.submit.<sid>.*
    *  then triggered with nomad.cmd.submit. */
   submit: (sid: number, hash: string, path: string, data: Record<string, string>) => void
+  /** Identities this device can present, LXMF ones first (see NomadIdentity). */
+  identities: ComputedRef<NomadIdentity[]>
+  /** Identify to `hash` on this session's link — now, and on every link it
+   *  opens to that site afterwards. The firmware re-fetches the open page as
+   *  that person and writes the choice into any bookmark of the site; without
+   *  one it lives in the session (the tab) and dies with it. `sel` omitted
+   *  lets the firmware pick (the sole LXMF identity, else the node). */
+  identify: (sid: number, hash: string, on: boolean, sel?: string) => void
   isBookmarked: (hash: string, path?: string) => boolean
-  addBookmark: (hash: string, path?: string, name?: string, note?: string) => void
+  /** `ident` saves who the site is browsed as (an identity `sel`, '' = nobody),
+   *  so opening the bookmark later identifies as the same person. */
+  addBookmark: (hash: string, path?: string, name?: string, ident?: string,
+                note?: string) => void
   delBookmark: (idOrUrl: string) => void
   /** Open an LXMF conversation for an lxmf@<hash> address tapped in a page
    *  (writes the shared `lxmf.url_web` var; LXMF reacts). */
@@ -142,7 +174,7 @@ export function useNomad(): UseNomad {
     const out: Bookmark[] = []
     for (const [id, raw] of Object.entries(tree)) {
       if (typeof raw !== 'string') continue
-      // "<hash>[:<path>]|<name>|<note>" — note last (may contain '|')
+      // "<hash>[:<path>]|<name>|<ident>|<note>" — note last (may contain '|')
       const p1 = raw.indexOf('|')
       if (p1 < 0) continue
       const url = raw.slice(0, p1)
@@ -150,12 +182,15 @@ export function useNomad(): UseNomad {
       const hash = colon >= 0 ? url.slice(0, colon) : url
       const path = colon >= 0 ? url.slice(colon + 1) : DEFAULT_PAGE
       if (!HASH_RE.test(hash)) continue
-      const rest = raw.slice(p1 + 1)
+      let rest = raw.slice(p1 + 1)
       const p2 = rest.indexOf('|')
+      const name = p2 >= 0 ? rest.slice(0, p2) : rest
+      rest = p2 >= 0 ? rest.slice(p2 + 1) : ''
+      const p3 = rest.indexOf('|')
       out.push({
-        id, hash, path,
-        name: p2 >= 0 ? rest.slice(0, p2) : rest,
-        note: p2 >= 0 ? rest.slice(p2 + 1) : '',
+        id, hash, path, name,
+        ident: p3 >= 0 ? rest.slice(0, p3) : rest,
+        note: p3 >= 0 ? rest.slice(p3 + 1) : '',
       })
     }
     return out.sort((a, b) => (a.name || a.hash).localeCompare(b.name || b.hash))
@@ -186,7 +221,9 @@ export function useNomad(): UseNomad {
     const navError = computed(() => String(device.get(`${base}.nav.error`) ?? ''))
     const busy = computed(() =>
       ['path_requested', 'establishing', 'requesting'].includes(navStatus.value))
-    s = { page, navStatus, navHash, navPath, navError, busy }
+    const identify = computed(() => Number(device.get(`${base}.identify`) ?? 0) !== 0)
+    const identifyAs = computed(() => String(device.get(`${base}.identify_as`) ?? ''))
+    s = { page, navStatus, navHash, navPath, navError, busy, identify, identifyAs }
     sessions.set(sid, s)
     return s
   }
@@ -220,16 +257,53 @@ export function useNomad(): UseNomad {
     device.sendJson(patch)
   }
 
+  /* The LXMF identities this device holds, then the node's own. Read off the
+   * lxmf tree directly — the same decoupling as the nomad↔lxmf page links:
+   * nothing is called, a published key is read. A slot counts as present once
+   * its destination is up (`lxmf.id.<n>.dest_hash`); the private keys live
+   * under `secrets.*` and never leave the device, which is why the firmware
+   * takes a selector and resolves the key itself. */
+  const identities = computed<NomadIdentity[]>(() => {
+    const out: NomadIdentity[] = []
+    const ids = device.get('lxmf.id') ?? {}
+    for (const [slot, v] of Object.entries<any>(ids)) {
+      const hash = String(v?.dest_hash ?? '')
+      if (!/^[0-9a-f]{32}$/i.test(hash)) continue
+      const name = String(device.get(`s.lxmf.id.${slot}.display_name`) ?? '')
+      out.push({ sel: `lxmf${slot}`, label: name || `LXMF identity ${slot}`,
+                 hash, lxmf: true })
+    }
+    out.sort((a, b) => a.sel.localeCompare(b.sel))
+    out.push({ sel: 'node', label: 'This node',
+               hash: String(device.get('rnsd.identity_hash') ?? ''), lxmf: false })
+    return out
+  })
+
+  const identify = (sid: number, hash: string, on: boolean, sel = '') => {
+    const h = hash.trim().toLowerCase()
+    if (!HASH_RE.test(h)) return
+    device.sendJson(nest('nomad.cmd.identify',
+                         `${sid}|${h}|${on ? 1 : 0}${sel ? `|${sel}` : ''}`))
+  }
+
   /* path: omit/'' = any bookmark on the host; pass a path for exact match. */
   const isBookmarked = (hash: string, path = '') =>
     bookmarks.value.some(b => b.hash === hash.toLowerCase() &&
                               (!path || b.path === path))
 
-  const addBookmark = (hash: string, path = DEFAULT_PAGE, name = '', note = '') => {
+  /* '|' delimits the fields and only the note (last) may hold one — and the
+   * name is a node's announced display name, i.e. remote input: a bar in it
+   * would shift every field after it, the next one being who we identify to
+   * that node as. The firmware folds bars too; neither end trusts the other. */
+  const noBar = (s: string) => s.replace(/\|/g, '/')
+
+  const addBookmark = (hash: string, path = DEFAULT_PAGE, name = '',
+                       ident = '', note = '') => {
     const h = hash.trim().toLowerCase()
     if (!HASH_RE.test(h)) return
+    const url = `${h}:${noBar(path || DEFAULT_PAGE)}`
     device.sendJson(nest('nomad.cmd.bookmark.add',
-                         `${h}:${path || DEFAULT_PAGE}|${name}|${note}`))
+                         `${url}|${noBar(name)}|${noBar(ident)}|${note}`))
   }
 
   /* By id (from the bookmarks list), or a "<hash>[:<path>]" url. */
@@ -250,7 +324,8 @@ export function useNomad(): UseNomad {
 
   return {
     nodes, bookmarks, session,
-    go, reload, submit, isBookmarked, addBookmark, delBookmark, openLxmf,
+    go, reload, submit, identities, identify,
+    isBookmarked, addBookmark, delBookmark, openLxmf,
   }
 }
 

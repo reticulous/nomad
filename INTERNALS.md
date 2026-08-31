@@ -98,12 +98,51 @@ Per session, on `nomad.cmd.go`:
    node, reuse it (no re-establish, no ITS-conn churn); otherwise drop a link to
    a different node and `rnsdLinkOpen` a fresh one (`s.nomad.link_timeout`
    overrides the establishment budget; `0` lets rnsd derive it).
-4. `rnsdLinkRequest(tag, path[, packed])` — rnsd holds the request until the
+4. **Identify, if this session identifies to the node** (`nomad.cmd.identify`,
+   the frontends' ID button) and this link has not been identified on yet:
+   `rnsdLinkIdentify(tag)` goes out **before** the request. rnsd holds both on
+   a link still coming up and runs them in that order at establishment, so a
+   node that gates the page on who is asking has the identity in hand when the
+   request lands. Once per link — a second LINKIDENTIFY tells the peer nothing
+   new. The site list is per session, RAM-only and capped at
+   `NOMAD_IDENT_MAX` (8): identifying is one tab's choice for as long as it
+   browses, which is why it is not a setting and not shared between sessions.
+
+   **A bookmark of the node seeds it** (§6). When the session holds no choice
+   for this host, `bookmarkIdentFor()` supplies the bookmark's — before
+   `identPublish` lights the button and before the LINKIDENTIFY above, so a
+   bookmark opens as its person from the first request rather than one
+   round-trip later. The session's own choice wins where it has one, and
+   cannot disagree with the bookmark: turning ID off clears the bookmark's
+   selector in the same breath (`bookmarkSetIdent`).
+
+   **Pressing ID re-fetches the open page** (cache bypassed) as who the
+   operator now is — the page a node gates on identity is precisely the page
+   that must not survive the button that changed it. Off drops the link first:
+   an identify already sent cannot be unsaid, so only a fresh link asks
+   anonymously again.
+
+   **Who we identify as is not whose link it is.** The fetch rides rnsd's
+   identity; the LINKIDENTIFY is signed with the one the operator chose, which
+   `rnsdLinkIdentify(tag, identity_key)` carries. Frontends hand over a
+   *selector* — `lxmf<n>` or `node` — and `identKeyForSel()` turns it into
+   `secrets.lxmf.id.<n>.privkey` or "" (rnsd's own): a secrets path never
+   reaches a UI, and nomad itself never reads one — it counts identities by
+   `lxmf.id.<n>.dest_hash`, exactly as the UIs list them from that plus
+   `s.lxmf.id.<n>.display_name`, so the default and the chooser can never
+   disagree, and rnsd is the only reader of the key. Nothing is
+   linked against lxmf — the coupling is storage keys, as with the
+   `nomad.url_web` page links — and the slot scan runs past lxmf's own ceiling
+   because the slots are sparse. With no selector given (the CLI), the
+   firmware takes the sole LXMF identity if there is exactly one and this
+   node's own otherwise; anything ambiguous is the operator's to answer, which
+   is what the frontends' chooser is for.
+5. `rnsdLinkRequest(tag, path[, packed])` — rnsd holds the request until the
    Link is ACTIVE, then issues it. GET = `nullptr/0`; a form passes the packed
    msgpack map with `data_packed=true`.
-5. The response arrives on `NOMAD_RESP_PORT` → shared cache + `nomad.s<sid>.page.*`;
+6. The response arrives on `NOMAD_RESP_PORT` → shared cache + `nomad.s<sid>.page.*`;
    status → `nomad.s<sid>.nav.status`.
-6. On success the Link **stays open** for same-node reuse; on failure it is
+7. On success the Link **stays open** for same-node reuse; on failure it is
    dropped so the next attempt re-establishes cleanly.
 
 **nav.status reflection.** rnsd publishes each Link's progress to
@@ -115,8 +154,12 @@ are owned by the aux handler — `onLinkState` must not clobber them (it checks
 `active && !terminal`).
 
 **Page cache.** LRU, `NOMAD_CACHE_MAX_ENTRIES` (16) / `NOMAD_CACHE_MAX_BYTES`
-(512 KB PSRAM), oldest-`fetched_s` eviction, keyed `<hash>:<path>`, shared across
-sessions. `cachePut` refreshes an entry in place; a `reload` leaves the entry
+(512 KB PSRAM), oldest-`fetched_s` eviction, keyed `<sel>@<hash>:<path>`
+(`cacheKey`), shared across sessions. **The identity is part of the key**: a
+node answers a gated page from who is asking, so the same url fetched as two
+different people is two different pages, and an anonymous session can never be
+handed what somebody's identity opened — which matters the moment a bookmark
+starts identifying for a session that has already browsed the site as nobody. `cachePut` refreshes an entry in place; a `reload` leaves the entry
 intact until fresh bytes arrive (so Back still shows the old page after a failed
 reload). Form-submit responses are never cached.
 
@@ -139,15 +182,46 @@ node is evicted (`nodeCountAndMaybeOldest` walks the tree). Names are sanitized
 
 ## 6. Bookmarks
 
-`s.nomad.bookmarks.<id>` = `"<hash>[:<path>]|<name>|<note>"`, persisted and
-browser-synced — the only durable nomad state besides config. Bookmarks address
-a host **and** a path (page bookmarks, not just nodes), so the key is an opaque
-`<id>` (unix seconds, de-collided against existing keys) because the url can't be
-a storage key (paths contain dots). The note is last and may contain `|`; the
-url and name must not. Re-adding an existing url updates its name/note in place
+`s.nomad.bookmarks.<id>` = `"<hash>[:<path>]|<name>|<ident>|<note>"`, persisted
+and browser-synced — the only durable nomad state besides config. Bookmarks
+address a host **and** a path (page bookmarks, not just nodes), so the key is an
+opaque `<id>` (unix seconds, de-collided against existing keys) because the url
+can't be a storage key (paths contain dots). The note is last and may contain
+`|`; the other three must not. `bmParse`/`bmPack` are the one place that knows
+the packing. Re-adding an existing url updates its fields in place
 (`bookmarkIdForUrl` scans for a url match). `bookmark.del` accepts either the
 `<id>` or a `<hash>[:<path>]` url (≥32 chars → treated as a url and resolved to
 its id). A bare host bookmark is normalised to `<hash>:/page/index.mu`.
+
+**`<name>` follows the node's own.** The name in the store is a copy of an
+announce, so `onAnnounceFromRnsd` hands every announce to `bookmarkFollowName`,
+which renames the host's bookmarks when the name it carries is new. Two cases
+are one rule: a node bookmarked before it was ever heard has an empty name (the
+frontends store the announced name or nothing — never the hash stub they
+*display* in its place, which no announce would ever match), and a node that
+renames itself leaves its bookmarks holding the previous announce's name. Both
+are recognised by comparing against `was` — what the feed held before this
+announce — so a name that matches neither is one the operator typed in the
+settings form, and no announce overwrites that. An empty announce name renames
+nothing: silence is not a new name. `nomad.cmd.bookmark.add` with no name fills
+it from the feed, so the CLI and a blank settings form land in the same place.
+
+**A bar is folded out of every field but the note** (`bmField`, applied in
+`bmPack`; the SPA and the LCD do the same before composing an add). The name is
+a node's announced display name — remote input — and a `|` in it would shift
+every field after it, the next one being `<ident>`: an announce could otherwise
+name itself `Foo|lxmf0|` and be identified to as the operator, unasked.
+
+**`<ident>` is the identity the site is browsed as** — the ID button's selector
+(`lxmf<n>` | `node`, empty = anonymously), which is what makes that choice
+outlive the session that made it (§4). It is a property of the **host**, since
+that is what a Link and a LINKIDENTIFY are: `bookmarkSetIdent` writes every
+bookmark naming the host, `bookmarkIdentFor` reads the first that carries one.
+Both walk the whole list — it is user-sized and both run on a user action, so
+one writer for the store beats a second index of it; `bookmarkSetIdent` collects
+before it writes, because `storageForEach` must not see the tree mutate under
+it. The settings collection's edit form does not bind it (it is not text the
+operator types), so `onBmSet` carries the stored value across an edit.
 
 **A bookmarked host is claimed in rnsd's directory** (`rnsdClaim`, consumer
 `RNSD_CLAIM_NOMAD`, PERSIST, layer `DIR`), so its identity and route outrank the
@@ -239,6 +313,20 @@ correctness detail that lives entirely in rns, not here.
 Both consume the same wire Micron; they diverge in layout and interaction by
 design (a 320×240 trackball UI vs. a wide mouse/keyboard browser tab), so
 pixel-parity is a non-goal.
+
+**A fetch never blanks the page it is replacing.** Both renderers keep the page
+that is on screen up until the bytes for the URL now being fetched arrive, and
+say what they are doing in the status hover instead. An empty view mid-fetch
+reads as a load that has already finished — the operator sees the old page
+vanish and takes the blank for the new one. So: the SPA marks the tab `stale`
+and swaps `body` only on a page whose hash **and** path match the tab's current
+URL (scrolling to the top only when it is a different page — a reload keeps the
+reading position); the LCD calls `clearPageBody()` only from the two outcomes
+that actually replace what is up (a rendered page, a failure) and from
+`openPage`, which starts a fresh context from the site list. A failed fetch
+shows its error only when the page up belongs to another URL — a reload that
+could not connect leaves the page it could not refresh, matching the cache rule
+in §4.
 
 - **`browser/src/lib/micron.ts`** — Micron→HTML. Every literal run is
   HTML-escaped and only a fixed whitelist of tags/style props is emitted; link

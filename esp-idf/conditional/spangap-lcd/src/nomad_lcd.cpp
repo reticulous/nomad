@@ -7,9 +7,10 @@
  *   - List:  bookmarks on top, announce-drift nodes below; tap one to open
  *            its index page.
  *   - Page:  top bar — ☰ site list, ⟳ reload, ‹ back (history; site list at
- *            the bottom of the stack), node name, then −/+ font steppers at
- *            the right — over a scrollable rendered Micron view. The left
- *            button cluster matches the web UI's address bar.
+ *            the bottom of the stack), node name, then ID (identify to this
+ *            node), ★ (bookmark) and the −/+ font steppers at the right —
+ *            over a scrollable rendered Micron view. The left button cluster
+ *            matches the web UI's address bar, as do ID and ★.
  *
  * The C++ Micron→LVGL renderer is independent of the SPA's TS renderer and
  * native to this UI: single column, hard-wrapped to the screen width, links
@@ -24,10 +25,12 @@
  *
  * Storage is the API (same keys the firmware nomad task + SPA use):
  *   nomad.nodes.<hex>        "<last_s>|<hops>|<name>"   announced nodes
- *   s.nomad.bookmarks.<id>   "<hash>[:<path>]|<name>|<note>"
+ *   s.nomad.bookmarks.<id>   "<hash>[:<path>]|<name>|<ident>|<note>"
  *   nomad.s6.nav.{status,hash,path}                     navigation state
  *   nomad.s6.page.{body,size,truncated,hash,path}       current page
+ *   nomad.s6.identify                                   1 = identifying here
  *   nomad.cmd.go = "6|<hash>:<path>"                    navigate sentinel
+ *   nomad.cmd.identify = "6|<hash>|<0|1>|<sel>"         ID toggle
  * (the LCD owns nomad session 6 — NOMAD_LCD_SESSION; web tabs own 0-5)
  * Everything runs on the lcd task; storage subscriptions dispatch there, so
  * we touch LVGL straight from the change callback.
@@ -211,8 +214,9 @@ constexpr uint32_t STATUS_HIDE_MS = 2000;
 lv_timer_t* s_statusTimer  = nullptr;
 bool        s_statusSticky = false;    /* loading/failed — no auto-hide */
 
-/* Header widgets that change state: ★ bookmark toggle, −/+ font steppers
- * (greyed at the ends of the font ladder). */
+/* Header widgets that change state: ID identify toggle, ★ bookmark toggle,
+ * −/+ font steppers (greyed at the ends of the font ladder). */
+lv_obj_t* s_idBtn     = nullptr;
 lv_obj_t* s_starBtn   = nullptr;
 lv_obj_t* s_fontMinus = nullptr;
 lv_obj_t* s_fontPlus  = nullptr;
@@ -264,27 +268,41 @@ bool matchLxmfAt(const std::string& line, size_t pos, std::string& hash) {
     return true;
 }
 
-/* Scan the bookmark tree ("<hash>[:<path>]|<name>|<note>", id-keyed) for a
- * host (+ optional exact path) match. Empty id in the result = no match. */
+/* The fields of a packed bookmark value, "<hash>[:<path>]|<name>|<ident>|
+ * <note>": <ident> is the identify selector the site is browsed with ("" =
+ * anonymously), and the note is last so it alone may contain '|'. */
+struct BmVal { std::string url, name, ident, note; };
+bool bmParse(const std::string& v, BmVal& out) {
+    size_t p1 = v.find('|');
+    if (p1 == std::string::npos) return false;
+    out.url = v.substr(0, p1);
+    std::string rest = v.substr(p1 + 1);
+    size_t p2 = rest.find('|');
+    out.name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
+    rest     = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
+    size_t p3 = rest.find('|');
+    out.ident = (p3 == std::string::npos) ? rest : rest.substr(0, p3);
+    out.note  = (p3 == std::string::npos) ? ""   : rest.substr(p3 + 1);
+    return true;
+}
+
+/* Scan the id-keyed bookmark tree for a host (+ optional exact path) match.
+ * Empty id in the result = no match. */
 struct BmScan { std::string hash, path /* "" = any */, id, name; };
 BmScan* s_bmScan = nullptr;
 void bmScanLeaf(const char* key, const char* val) {
     if (!s_bmScan || !s_bmScan->id.empty() || !key || !val) return;
     const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
     if (strchr(tail, '.')) return;
-    std::string v = val;
-    size_t p1 = v.find('|');
-    if (p1 == std::string::npos) return;
-    std::string url = v.substr(0, p1);
-    size_t colon = url.find(':');
-    std::string h = colon == std::string::npos ? url : url.substr(0, colon);
-    std::string p = colon == std::string::npos ? DEFAULT_PAGE : url.substr(colon + 1);
+    BmVal b;
+    if (!bmParse(val, b)) return;
+    size_t colon = b.url.find(':');
+    std::string h = colon == std::string::npos ? b.url : b.url.substr(0, colon);
+    std::string p = colon == std::string::npos ? DEFAULT_PAGE : b.url.substr(colon + 1);
     if (h != s_bmScan->hash) return;
     if (!s_bmScan->path.empty() && p != s_bmScan->path) return;
-    std::string rest = v.substr(p1 + 1);
-    size_t p2 = rest.find('|');
     s_bmScan->id   = tail;
-    s_bmScan->name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
+    s_bmScan->name = b.name;
 }
 BmScan bookmarkFor(const std::string& hash, const std::string& path) {
     BmScan s{ hash, path, "", "" };
@@ -294,20 +312,32 @@ BmScan bookmarkFor(const std::string& hash, const std::string& path) {
     return s;
 }
 
+/* The name the node announced, verbatim — "" when it has not been heard (or
+ * announces none). What a bookmark stores, so that an unheard node is
+ * bookmarked with an empty name the first announce can still fill in, rather
+ * than with the hash stub nodeName() shows in its place. */
+std::string announcedName(const std::string& hash) {
+    char k[80];
+    snprintf(k, sizeof k, "nomad.nodes.%s", hash.c_str());
+    std::string v = storageGetStr(k, "");   /* "<last_s>|<hops>|<name>" */
+    size_t p1 = v.find('|');
+    size_t p2 = p1 == std::string::npos ? p1 : v.find('|', p1 + 1);
+    return p2 == std::string::npos ? "" : v.substr(p2 + 1);
+}
+
+/* '|' delimits the bookmark fields and only the note (last) may hold one, so
+ * fold bars out of anything remote before composing an add — the same guard
+ * the firmware and the SPA apply at their own ends. */
+std::string noBar(std::string s) {
+    for (char& c : s) if (c == '|') c = '/';
+    return s;
+}
+
 std::string nodeName(const std::string& hash) {
     BmScan bm = bookmarkFor(hash, "");
     if (!bm.id.empty() && !bm.name.empty()) return printable(bm.name, true);
-    char k[80];
-    snprintf(k, sizeof k, "nomad.nodes.%s", hash.c_str());
-    std::string v = storageGetStr(k, "");
-    if (!v.empty()) {                       /* "<last_s>|<hops>|<name>" */
-        size_t p1 = v.find('|');
-        size_t p2 = p1 == std::string::npos ? std::string::npos : v.find('|', p1 + 1);
-        if (p2 != std::string::npos) {
-            std::string nm = v.substr(p2 + 1);
-            if (!nm.empty()) return printable(nm, true);
-        }
-    }
+    std::string nm = announcedName(hash);
+    if (!nm.empty()) return printable(nm, true);
     return hash.substr(0, 8) + "...";
 }
 
@@ -335,8 +365,14 @@ void statusShow(bool autohide) {
     }
 }
 
-/* Star lit when the open page is bookmarked; −/+ grey at the ladder ends. */
+/* ID green while this session identifies to the open node; star lit when the
+ * open page is bookmarked; −/+ grey at the ladder ends. */
 void updateHdrButtons() {
+    if (s_idBtn) {
+        bool on = isHash(s_curHash) && storageGetInt(NKEY("identify"), 0) != 0;
+        lv_obj_set_style_bg_color(s_idBtn, lv_color_hex(on ? 0x1E5B32 : 0x3A424E), 0);
+        lv_obj_set_style_text_color(s_idBtn, lv_color_hex(on ? 0xEAFFF1 : 0xA8B0BA), 0);
+    }
     if (s_starBtn) {
         std::string path = s_curPath.empty() ? DEFAULT_PAGE : s_curPath;
         bool bm = isHash(s_curHash) && !bookmarkFor(s_curHash, path).id.empty();
@@ -350,6 +386,117 @@ void updateHdrButtons() {
     if (s_fontPlus)
         lv_obj_set_style_text_color(s_fontPlus,
             lv_color_hex(idx >= kPageFontN - 1 ? 0x565C64 : 0xC0C8D0), 0);
+}
+
+/* ---- identify (the ID button) ----
+ *
+ * The firmware takes a SELECTOR — "lxmf<n>" or "node" — and resolves the key
+ * itself; the private keys live under secrets and are never read here. An
+ * identity is offered once its destination is up (lxmf.id.<n>.dest_hash),
+ * which is also what the web UI lists. */
+
+/* Slots scanned. Higher than the four LXMF allocates today: they are sparse
+ * (destroying id 0 leaves id 1), a miss is one storage read, and this file
+ * must not depend on lxmf's private ceiling. */
+constexpr int kLxmfSlots = 8;
+
+struct IdentOpt { std::string sel, label, hash; };
+std::vector<IdentOpt> s_idOpts;      /* the open chooser's rows, by index */
+lv_obj_t*             s_idPick = nullptr;
+
+std::vector<IdentOpt> identityOptions() {
+    std::vector<IdentOpt> out;
+    for (int n = 0; n < kLxmfSlots; ++n) {
+        char k[64];
+        snprintf(k, sizeof k, "lxmf.id.%d.dest_hash", n);
+        std::string h = storageGetStr(k, "");
+        if (!isHash(h)) continue;
+        snprintf(k, sizeof k, "s.lxmf.id.%d.display_name", n);
+        std::string nm = storageGetStr(k, "");
+        if (nm.empty()) nm = std::string("LXMF identity ") + (char)('0' + (n % 10));
+        /* One digit, because kLxmfSlots is one digit — concatenated so the
+         * bound is in the code, not in a comment a format string cannot see. */
+        std::string sel = std::string("lxmf") + (char)('0' + (n % 10));
+        out.push_back({ sel, printable(nm, true), h });
+    }
+    /* Last, and named for what it is: browsing as the node is the fallback, not
+     * the identity a node operator knows this person by. */
+    out.push_back({ "node", "This node", storageGetStr("rnsd.identity_hash", "") });
+    return out;
+}
+
+void sendIdentify(const std::string& sel, bool on) {
+    if (!isHash(s_curHash)) return;
+    std::string v = NSID "|" + s_curHash + (on ? "|1|" : "|0|") + sel;
+    storageSet("nomad.cmd.identify", v.c_str());
+}
+
+void closeIdentityChooser() {
+    if (s_idPick && lv_obj_is_valid(s_idPick)) lv_obj_delete(s_idPick);
+    s_idPick = nullptr;
+}
+
+/* One LXMF identity is the answer without asking. Anything else — several to
+ * choose between, or none, leaving only this node's own — is the operator's
+ * decision, so it is put to them. */
+void openIdentityChooser() {
+    closeIdentityChooser();
+    if (!s_page) return;
+    s_idOpts = identityOptions();
+
+    s_idPick = lv_obj_create(s_page);
+    lv_obj_remove_style_all(s_idPick);
+    lv_obj_set_size(s_idPick, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(s_idPick, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_idPick, LV_OPA_70, 0);
+    lv_obj_add_flag(s_idPick, LV_OBJ_FLAG_CLICKABLE);     /* swallow taps behind */
+    lv_obj_move_foreground(s_idPick);
+    /* The panel's own escape: two rapid taps anywhere take this down, whatever
+     * the trackball focus is doing. */
+    lcdModalTrack(s_idPick, [](void*) { closeIdentityChooser(); });
+    lv_obj_add_event_cb(s_idPick, [](lv_event_t*) { closeIdentityChooser(); },
+                        LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t* card = lv_obj_create(s_idPick);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_width(card, lv_pct(86));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(card, lv_pct(86), 0);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1b2129), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 8, 0);
+    lv_obj_set_style_pad_row(card, 4, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x3a4658), 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);         /* not a dismiss tap */
+
+    lv_obj_t* title = mkLabel(card, "Identify as", lv_color_hex(0x9aa4b0));
+    lv_obj_set_width(title, lv_pct(100));
+
+    for (size_t i = 0; i < s_idOpts.size(); ++i) {
+        lv_obj_t* row = lv_obj_create(card);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_all(row, 4, 0);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x27303c), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        mkLabel(row, s_idOpts[i].label, lv_color_white());
+        std::string sub = s_idOpts[i].hash.empty() ? std::string("\xE2\x80\x94")
+                                                   : s_idOpts[i].hash.substr(0, 16) + "\xE2\x80\xA6";
+        mkLabel(row, sub, lv_color_hex(0x8f99a6));
+        lv_obj_add_event_cb(row, [](lv_event_t* e) {
+            size_t i = (size_t)(intptr_t)lv_event_get_user_data(e);
+            if (i < s_idOpts.size()) sendIdentify(s_idOpts[i].sel, true);
+            closeIdentityChooser();
+        }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
 }
 
 /* Navigate: write the go sentinel; the firmware fetches and republishes
@@ -870,6 +1017,33 @@ void buildPageShell() {
     s_pageName = mkLabel(hdr, "", lv_color_white());
     lv_obj_align(s_pageName, LV_ALIGN_LEFT_MID, 78, 0);
 
+    /* ID — identify to the open node on this session's Link, left of the
+     * star. Dark green while on. The firmware repeats the choice on every
+     * link this session opens to the node and re-fetches the open page as
+     * that person; a bookmark of the node keeps it across reboots. */
+    s_idBtn = mkLabel(hdr, "ID", lv_color_hex(0xa8b0ba));
+    lv_obj_set_style_bg_color(s_idBtn, lv_color_hex(0x3a424e), 0);
+    lv_obj_set_style_bg_opa(s_idBtn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_idBtn, 3, 0);
+    lv_obj_set_style_pad_hor(s_idBtn, 4, 0);
+    lv_obj_set_style_pad_ver(s_idBtn, 2, 0);
+    lv_obj_align(s_idBtn, LV_ALIGN_RIGHT_MID, -128, 0);
+    lv_obj_add_flag(s_idBtn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_idBtn, 10);
+    lv_obj_add_event_cb(s_idBtn, [](lv_event_t*) {
+        if (!isHash(s_curHash)) return;
+        if (storageGetInt(NKEY("identify"), 0) != 0) {   /* on → off, as we are */
+            sendIdentify(storageGetStr(NKEY("identify_as"), "node"), false);
+            return;
+        }
+        std::vector<IdentOpt> opts = identityOptions();
+        int lxmf = 0;
+        std::string only;
+        for (auto& o : opts) if (o.sel != "node") { lxmf++; only = o.sel; }
+        if (lxmf == 1) sendIdentify(only, true);
+        else           openIdentityChooser();
+    }, LV_EVENT_CLICKED, nullptr);
+
     /* ★ bookmark toggle for the open page (host + path), left of the font
      * steppers; lit when the current page is bookmarked. */
     s_starBtn = mkLabel(hdr, SYMBOL_STAR, lv_color_hex(0x565c64));
@@ -883,7 +1057,12 @@ void buildPageShell() {
         if (!bm.id.empty()) {
             storageSet("nomad.cmd.bookmark.del", bm.id.c_str());
         } else {
-            std::string add = s_curHash + ":" + path + "|" + nodeName(s_curHash);
+            /* Bookmarking while identified saves who this site is browsed as,
+             * so opening it later identifies as the same person. */
+            std::string ident = storageGetInt(NKEY("identify"), 0) != 0
+                              ? storageGetStr(NKEY("identify_as"), "") : "";
+            std::string add = s_curHash + ":" + noBar(path) + "|"
+                            + noBar(announcedName(s_curHash)) + "|" + ident + "|";
             storageSet("nomad.cmd.bookmark.add", add.c_str());
         }
     }, LV_EVENT_CLICKED, nullptr);
@@ -936,13 +1115,18 @@ void buildPageShell() {
     lv_label_set_text(s_status, "");
 }
 
-void rebuildPage() {
-    if (!s_pageBody) return;
-    refreshFonts();
+/* Drop the rendered page and everything that points into it. Only the two
+ * outcomes that replace what is on screen call this — see rebuildPage. */
+void clearPageBody() {
     lv_obj_clean(s_pageBody);
     s_linkTargets.clear();
     s_lxmfTargets.clear();
     s_fields.clear();
+}
+
+void rebuildPage() {
+    if (!s_pageBody) return;
+    refreshFonts();
 
     std::string status = storageGetStr(NKEY("nav.status"), "");
     std::string pageHash = storageGetStr(NKEY("page.hash"), "");
@@ -953,10 +1137,14 @@ void rebuildPage() {
         if (s_status) lv_label_set_text(s_status, "Failed");
         s_statusSticky = true;
         statusShow(false);
+        clearPageBody();
         mkLabel(s_pageBody, "Could not load the page.", lv_color_hex(0xe08a8a));
         return;
     }
     if (status != "done" || !current) {
+        /* Mid-fetch: the page already on screen stays up, with the status
+         * hover saying what is happening. Blanking it reads as a page that
+         * has finished loading, which is the one thing it has not done. */
         const char* m = status == "establishing" ? "Establishing link..."
                       : status == "requesting"    ? "Requesting page..."
                       : status == "path_requested"? "Requesting path..."
@@ -966,6 +1154,7 @@ void rebuildPage() {
         statusShow(false);
         return;
     }
+    clearPageBody();
 
     int sz = storageGetInt(NKEY("page.size"), 0);
     int truncated = storageGetInt(NKEY("page.truncated"), 0);
@@ -992,6 +1181,9 @@ void openPage(const std::string& hash, const std::string& path = "") {
     lcdProgramFullscreen(true);
     lv_label_set_text(s_pageName, nodeName(hash).c_str());
     s_hist.clear();                       /* fresh context from the site list */
+    /* Coming in from the list is a fresh start, not a step within a page's
+     * links: the last site's page must not sit under the new one's status. */
+    if (s_pageBody) clearPageBody();
     navigate(hash, path.empty() ? DEFAULT_PAGE : path, /*push=*/false);
     rebuildPage();
 }
@@ -1107,22 +1299,15 @@ void collectBookmark(const char* key, const char* val) {
     if (!s_collectBms || !key) return;
     const char* tail = key + sizeof("s.nomad.bookmarks.") - 1;
     if (strchr(tail, '.')) return;
-    /* "<hash>[:<path>]|<name>|<note>" — id-keyed; note last (may hold '|') */
-    std::string v = val ? val : "";
-    size_t p1 = v.find('|');
-    if (p1 == std::string::npos) return;
-    std::string url = v.substr(0, p1);
-    size_t colon = url.find(':');
-    std::string hash = colon == std::string::npos ? url : url.substr(0, colon);
-    std::string path = colon == std::string::npos ? "" : url.substr(colon + 1);
+    BmVal b;
+    if (!bmParse(val ? val : "", b)) return;
+    size_t colon = b.url.find(':');
+    std::string hash = colon == std::string::npos ? b.url : b.url.substr(0, colon);
+    std::string path = colon == std::string::npos ? "" : b.url.substr(colon + 1);
     if (!isHash(hash)) return;
-    std::string rest = v.substr(p1 + 1);
-    size_t p2 = rest.find('|');
-    std::string name = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
-    std::string note = (p2 == std::string::npos) ? ""   : rest.substr(p2 + 1);
     s_collectBms->push_back({ tail, hash, path,
-                              name.empty() ? hash.substr(0, 8) + "..." : printable(name, true),
-                              printable(note, true) });
+                              b.name.empty() ? hash.substr(0, 8) + "..." : printable(b.name, true),
+                              printable(b.note, true) });
 }
 
 void rebuildList() {
@@ -1221,7 +1406,9 @@ void onStorageChange(const char* key, const char*) {
     if (pageOpen) {
         /* Only OUR session's nav/page keys — web-tab sessions (s0-s5) churn
          * in parallel and must not trigger LCD rebuilds. */
-        if (!strncmp(key, NKEY(""), sizeof(NKEY("")) - 1))
+        if (!strcmp(key, NKEY("identify")))
+            updateHdrButtons();           /* ID colour only — not a rebuild */
+        else if (!strncmp(key, NKEY(""), sizeof(NKEY("")) - 1))
             rebuildPage();
         else if (!strncmp(key, "s.nomad.bookmarks", 17))
             updateHdrButtons();           /* star reflects the toggle */
@@ -1242,6 +1429,7 @@ void nomadApp(void* arg) {
     refreshFonts();   /* vector chrome/page fonts live before any label is built */
     s_layer = static_cast<lv_obj_t*>(arg);
     s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr; s_status = nullptr;
+    s_idBtn = nullptr; s_idPick = nullptr;
     s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
     s_curHash.clear();
     s_linkTargets.clear();
@@ -1303,7 +1491,8 @@ void NomadApp::onCreate(lv_obj_t* root) { nomadApp(root); }
 
 void NomadApp::onClose() {
     s_list = nullptr; s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr;
-    s_status = nullptr; s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
+    s_status = nullptr; s_idBtn = nullptr; s_idPick = nullptr;
+    s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
 }
 
 /* NomadApp::appInit — the boot-task half of bring-up, run once by
