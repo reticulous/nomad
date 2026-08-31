@@ -100,6 +100,12 @@ const PageFontStep kPageFontLadder[] = {
 const int kPageFontN = (int)(sizeof(kPageFontLadder) / sizeof(kPageFontLadder[0]));
 const lv_font_t* kPageFont = nullptr;   /* resolved from the index on rebuild */
 const int HDR_H = 20;
+/* Header geometry: the node name starts right of the ☰ ⟳ ‹ cluster, and the
+ * ID ★ − + cluster on the right sits in a flex row whose column gap is a
+ * touch wider than the left cluster's, so the four read as one group. */
+const int HDR_NAME_X  = 78;
+const int HDR_BTN_GAP = 12;
+const int HDR_PAD_R   = 6;
 
 int pageFontIdx() {
     int idx = storageGetInt("s.nomad.page_font", 2);   /* default: Spleen 5×8 */
@@ -371,7 +377,7 @@ void updateHdrButtons() {
     if (s_idBtn) {
         bool on = isHash(s_curHash) && storageGetInt(NKEY("identify"), 0) != 0;
         lv_obj_set_style_bg_color(s_idBtn, lv_color_hex(on ? 0x1E5B32 : 0x3A424E), 0);
-        lv_obj_set_style_text_color(s_idBtn, lv_color_hex(on ? 0xEAFFF1 : 0xA8B0BA), 0);
+        lv_obj_set_style_text_color(s_idBtn, lv_color_white(), 0);
     }
     if (s_starBtn) {
         std::string path = s_curPath.empty() ? DEFAULT_PAGE : s_curPath;
@@ -1014,22 +1020,41 @@ void buildPageShell() {
     lv_obj_set_ext_click_area(back, 10);
     lv_obj_add_event_cb(back, [](lv_event_t*) { goBack(); }, LV_EVENT_CLICKED, nullptr);
 
-    s_pageName = mkLabel(hdr, "", lv_color_white());
-    lv_obj_align(s_pageName, LV_ALIGN_LEFT_MID, 78, 0);
+    /* Node name — a size below the rest of the chrome so more of it fits,
+     * then ellipsised where the right cluster starts (width set below, once
+     * that cluster has measured itself). */
+    const lv_font_t* smallFont = lcdFont(LcdFace::UI, (int)(12 * lcdUiScale() + 0.5f));
+    s_pageName = mkLabel(hdr, "", lv_color_white(), smallFont);
+    lv_label_set_long_mode(s_pageName, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_pageName, LV_ALIGN_LEFT_MID, HDR_NAME_X, 0);
+
+    /* Right cluster — ID, ★ and the −/+ steppers in one right-aligned flex
+     * row: the gap between them is HDR_BTN_GAP whatever each glyph measures. */
+    lv_obj_t* rightCluster = lv_obj_create(hdr);
+    lv_obj_remove_style_all(rightCluster);
+    lv_obj_set_size(rightCluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(rightCluster, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(rightCluster, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(rightCluster, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(rightCluster, HDR_BTN_GAP, 0);
+    lv_obj_align(rightCluster, LV_ALIGN_RIGHT_MID, -HDR_PAD_R, 0);
 
     /* ID — identify to the open node on this session's Link, left of the
-     * star. Dark green while on. The firmware repeats the choice on every
-     * link this session opens to the node and re-fetches the open page as
-     * that person; a bookmark of the node keeps it across reboots. */
-    s_idBtn = mkLabel(hdr, "ID", lv_color_hex(0xa8b0ba));
+     * star; a small pill, dark green while on. The firmware repeats the
+     * choice on every link this session opens to the node and re-fetches the
+     * open page as that person; a bookmark of the node keeps it across
+     * reboots. */
+    s_idBtn = mkLabel(rightCluster, "ID", lv_color_white(), smallFont);
     lv_obj_set_style_bg_color(s_idBtn, lv_color_hex(0x3a424e), 0);
     lv_obj_set_style_bg_opa(s_idBtn, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_idBtn, 3, 0);
-    lv_obj_set_style_pad_hor(s_idBtn, 4, 0);
-    lv_obj_set_style_pad_ver(s_idBtn, 2, 0);
-    lv_obj_align(s_idBtn, LV_ALIGN_RIGHT_MID, -128, 0);
+    lv_obj_set_style_radius(s_idBtn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_hor(s_idBtn, 6, 0);
+    lv_obj_set_style_pad_ver(s_idBtn, 1, 0);
     lv_obj_add_flag(s_idBtn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(s_idBtn, 10);
+    /* Half the cluster gap: neighbouring touch targets meet in the middle of
+     * it rather than overlapping (the later child would win the tap). */
+    lv_obj_set_ext_click_area(s_idBtn, HDR_BTN_GAP / 2);
     lv_obj_add_event_cb(s_idBtn, [](lv_event_t*) {
         if (!isHash(s_curHash)) return;
         if (storageGetInt(NKEY("identify"), 0) != 0) {   /* on → off, as we are */
@@ -1046,10 +1071,9 @@ void buildPageShell() {
 
     /* ★ bookmark toggle for the open page (host + path), left of the font
      * steppers; lit when the current page is bookmarked. */
-    s_starBtn = mkLabel(hdr, SYMBOL_STAR, lv_color_hex(0x565c64));
-    lv_obj_align(s_starBtn, LV_ALIGN_RIGHT_MID, -104, 0);
+    s_starBtn = mkLabel(rightCluster, SYMBOL_STAR, lv_color_hex(0x565c64));
     lv_obj_add_flag(s_starBtn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(s_starBtn, 12);
+    lv_obj_set_ext_click_area(s_starBtn, HDR_BTN_GAP / 2);
     lv_obj_add_event_cb(s_starBtn, [](lv_event_t*) {
         if (!isHash(s_curHash)) return;
         std::string path = s_curPath.empty() ? DEFAULT_PAGE : s_curPath;
@@ -1067,8 +1091,8 @@ void buildPageShell() {
         }
     }, LV_EVENT_CLICKED, nullptr);
 
-    /* Page-font stepper: − smaller / + larger (Montserrat 14 — easier to
-     * hit), persisted in s.nomad.page_font; user_data is the step. The end
+    /* Page-font stepper: − smaller / + larger (the 16 px symbol face — easier
+     * to hit), persisted in s.nomad.page_font; user_data is the step. The end
      * of the ladder greys out (updateHdrButtons). */
     auto fontStep = [](lv_event_t* e) {
         int idx = pageFontIdx() + (int)(intptr_t)lv_event_get_user_data(e);
@@ -1077,16 +1101,23 @@ void buildPageShell() {
         storageSet("s.nomad.page_font", idx);
         rebuildPage();
     };
-    s_fontMinus = mkLabel(hdr, LV_SYMBOL_MINUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
-    lv_obj_align(s_fontMinus, LV_ALIGN_RIGHT_MID, -45, 0);
+    s_fontMinus = mkLabel(rightCluster, LV_SYMBOL_MINUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
     lv_obj_add_flag(s_fontMinus, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(s_fontMinus, 12);
+    lv_obj_set_ext_click_area(s_fontMinus, HDR_BTN_GAP / 2);
     lv_obj_add_event_cb(s_fontMinus, fontStep, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
-    s_fontPlus = mkLabel(hdr, LV_SYMBOL_PLUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
-    lv_obj_align(s_fontPlus, LV_ALIGN_RIGHT_MID, -6, 0);
+    s_fontPlus = mkLabel(rightCluster, LV_SYMBOL_PLUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
     lv_obj_add_flag(s_fontPlus, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(s_fontPlus, 12);
+    lv_obj_set_ext_click_area(s_fontPlus, HDR_BTN_GAP / 2);
     lv_obj_add_event_cb(s_fontPlus, fontStep, LV_EVENT_CLICKED, (void*)(intptr_t)+1);
+
+    /* The name takes what is left between the left cluster and that row —
+     * measured once, since the four button widths never change. */
+    lv_obj_update_layout(hdr);
+    int hdrW = lv_obj_get_width(hdr);
+    if (hdrW <= 0) hdrW = lv_display_get_horizontal_resolution(lv_display_get_default());
+    int nameW = hdrW - HDR_NAME_X - lv_obj_get_width(rightCluster)
+              - HDR_PAD_R - HDR_BTN_GAP;
+    lv_obj_set_width(s_pageName, nameW > 16 ? nameW : 16);
 
     s_pageBody = lv_obj_create(s_page);
     lv_obj_remove_style_all(s_pageBody);

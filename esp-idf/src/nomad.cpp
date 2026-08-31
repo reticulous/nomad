@@ -1516,6 +1516,15 @@ static void nomadTaskMain(void*)
     itsServerPortOpen(NOMAD_RESP_PORT, /*packetBased=*/false,
                       /*maxHandles=*/1, /*toSize=*/0, /*fromSize=*/0);
     itsOnAux(NOMAD_RESP_PORT, onNomadAux);
+    /* And the shared resource-aux port. rnsd reports the Resource lifecycle
+     * there for EVERY link consumer, not only the one whose name the port used
+     * to carry — a link we opened is a link whose events are ours. Without it
+     * rnsd logs "aux send to unregistered port 101" and frees the frame's
+     * buffer. A /file download would land here; page GETs come back through
+     * NOMAD_RESP_PORT above, so for now this only has to own and release. */
+    itsServerPortOpen(RNSD_LINK_RESOURCE_AUX_PORT, /*packetBased=*/false,
+                      /*maxHandles=*/1, /*toSize=*/0, /*fromSize=*/0);
+    itsOnAux(RNSD_LINK_RESOURCE_AUX_PORT, onNomadAux);
     /* announce-fanout sub + up to NOMAD_SESSIONS parallel links, with
      * headroom so a transient lingering conn never blocks a fetch. */
     itsClientInit(NOMAD_SESSIONS + 5);

@@ -73,6 +73,13 @@ transient lingering conn never blocks a fetch).
   its session by matching `opaque_id` against the session's `req_id`;
   `RNSD_LINK_REQUEST_FAILED` fails the fetch. (File-download Resources —
   `RNSD_LINK_RESOURCE_INBOUND_DONE` — aren't handled.)
+- **`RNSD_LINK_RESOURCE_AUX_PORT` (101)** — the port rnsd reports the Resource
+  lifecycle on for *every* link consumer, by task handle; it carries no
+  consumer's name. A link we opened is a link whose events are ours, so nomad
+  opens it aux-only and hands it to `onNomadAux` as well. Without it rnsd logs
+  `aux send to unregistered port 101` and frees the frame's buffer; for now the
+  handler only has to own and release, since page GETs come back on
+  `NOMAD_RESP_PORT`.
 - **`RNSD_PORT_ANNOUNCES` (6)** — client connect with
   `rnsd_announces_connect_t` carrying the `nomadnetwork.node` aspect filter;
   rnsd delivers only matching announces as packet-mode frames
