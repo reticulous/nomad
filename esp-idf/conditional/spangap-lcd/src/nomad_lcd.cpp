@@ -786,6 +786,7 @@ void addField(lv_obj_t* parent, const Seg& s) {
     lv_obj_set_style_pad_hor(ta, 4, 0);
     lv_obj_set_width(ta, lv_pct(60));
     if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), ta);
+    lcdKeyboardAttach(ta);            /* no keys on the device → tap types */
     s_fields.push_back({ s.fname, ta });
 }
 
