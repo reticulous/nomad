@@ -10,7 +10,7 @@ nomad is built entirely on top of [rns](../rns) — it has no upstream baseline 
 its own; it **reimplements the NomadNet page/web client** against the NomadNet
 wire contract (§7). Relative to a desktop NomadNet browser it provides:
 
-- **The page-client task** (`esp-idf/src/nomad.cpp`) — storage-as-API, sentinel
+- **The page-client task** (`esp-idf/src/nomad.cpp`) — storage-as-API, command key
   dispatch, a single `itsPoll` wait point, zero RNS includes. All transport goes
   through rnsd's byte-array API (`rnsdLinkOpen`, `rnsdLinkRequest`, the
   announced-nodes fan-out).
@@ -360,7 +360,7 @@ in §4.
 
 ## 9. Maintainer pitfalls
 
-- **Reload sentinels need a unique value.** A constant re-write to
+- **Reload command keys need a unique value.** A constant re-write to
   `nomad.cmd.reload` (or `nomad.cmd.go`) is swallowed by the storage SET-dedup if
   a change notify was ever dropped, leaving reload permanently dead. Writers put
   a tick/time in the value.

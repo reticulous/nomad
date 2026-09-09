@@ -52,7 +52,7 @@ It sits on top of rnsd and is driven entirely through the storage tree:
   page bytes                                ──▶  nomad.s<sid>.page.body  (SPA / LCD render)
 ```
 
-A frontend never calls a custom RPC: it writes a `nomad.cmd.*` sentinel and
+A frontend never calls a custom RPC: it writes a `nomad.cmd.*` command key and
 reads the published `nomad.*` state. nomad starts automatically when the
 straddle is in the build (it brings up its task, the announced-nodes
 subscription, and the LCD launcher tile when `spangap-lcd` is staged).
@@ -83,7 +83,7 @@ Frontends drive nomad entirely through the config tree. `dest_hex` is the
 | `s.nomad.max_nodes` | `256` | Announced-nodes feed LRU cap; `0` = unbounded (oldest-heard node evicted when full). |
 | `s.nomad.page_font` | `2` | LCD page-font index, smallest first: `0` = Micro 2×3 (160 cols — a whole-page thumbnail), `1` = Tom Thumb 4×6 (80 cols), `2` = Spleen 5×8 (default), `3`–`7` = vector mono 10/12/14/16/20 px. Stepped by the LCD page header's −/+ buttons. |
 | `s.nomad.link_timeout` | `0` | Seconds a fetch Link may sit establishing before it fails. `0` lets rnsd derive the budget from the next hop's interface speed. |
-| `s.nomad.bookmarks.<id>` | — | A saved page: `<hash>[:<path>]\|<name>\|<ident>\|<note>` (addresses a host **and** a path). `<ident>` is the identity selector the site is browsed as (`lxmf<n>` \| `node`; empty = anonymously) — the **ID** button's choice, kept. `<id>` is an opaque key (a url can't be a storage key — paths contain dots). Written via the bookmark sentinels, not by hand. |
+| `s.nomad.bookmarks.<id>` | — | A saved page: `<hash>[:<path>]\|<name>\|<ident>\|<note>` (addresses a host **and** a path). `<ident>` is the identity selector the site is browsed as (`lxmf<n>` \| `node`; empty = anonymously) — the **ID** button's choice, kept. `<id>` is an opaque key (a url can't be a storage key — paths contain dots). Written via the bookmark command keys, not by hand. |
 
 ### Runtime state & telemetry (ephemeral, RAM-only — lost on reboot)
 
@@ -106,7 +106,7 @@ only to the in-device change *signal*, not the synced value). Larger pages set
 RAM/PSRAM cache, which the on-device LCD renderer reads directly, so the device
 renders even oversized pages.
 
-### Command sentinels (self-clearing)
+### Command keys (self-clearing)
 
 Write the key; nomad acts on the change and `storageUnset`s it immediately.
 Values are `|`-delimited where a field may itself contain spaces, and carry an
@@ -161,7 +161,7 @@ and the firmware resolves the key: a private key path never reaches a UI.
 
 The reverse of nomad's clickable `lxmf@<hash>` links: [lxmf](../lxmf) turns a
 `<32-hex hash>:/path` page URL quoted in a message into a tappable link.
-Activating one writes the URL to one of two ephemeral sentinels, and the
+Activating one writes the URL to one of two ephemeral command keys, and the
 matching Nomad frontend comes forward and navigates to it:
 
 | Key | Written by | Reaction |
@@ -186,7 +186,7 @@ nomad bookmark del <id | hash[:<path>]>
 ```
 
 Sessions: `0`–`5` are web tabs, `6` is the LCD; a bare `go`/`reload` acts on
-session 0. Each verb just writes the matching `nomad.cmd.*` sentinel, so the CLI
+session 0. Each verb just writes the matching `nomad.cmd.*` command key, so the CLI
 behaves identically to the SPA and LCD paths. Page bytes are logged as a
 one-line preview on fetch; nav state lives in `nomad.s<sid>.nav.*`. Run any of
 these on-device with `spangap cli "<command>"`.
@@ -220,7 +220,7 @@ and a browser tab render differently by design.
   `nomad.cpp` publishes from its own store with each row's two lines already
   composed — the persistent form is the packed `<url>|<name>|<ident>|<note>`
   string the browser app and the CLI read, so a published view is what lets both
-  shapes coexist. Mutations go back through the `nomad.bm.*` sentinels, where the
+  shapes coexist. Mutations go back through the `nomad.bm.*` command keys, where the
   hash check lives; `<ident>` is not among the form's fields — it is the ID
   button's, and an edit of the text fields carries it across untouched.
 
