@@ -1522,9 +1522,21 @@ NomadApp::NomadApp() : LcdApp({ .name = "Nomad", .iconBasename = "nomad" }) {}
 void NomadApp::onCreate(lv_obj_t* root) { nomadApp(root); }
 
 void NomadApp::onClose() {
+    /* The layer first, because it is the guard: onStorageChange tests s_layer
+     * before anything else, and the subscriptions outlive the eviction that
+     * frees it. A stale pointer here is one that passes its own guard and is
+     * handed to lv_obj_create as a parent. */
+    s_layer = nullptr;
     s_list = nullptr; s_page = nullptr; s_pageBody = nullptr; s_pageName = nullptr;
     s_status = nullptr; s_idBtn = nullptr; s_idPick = nullptr;
     s_starBtn = nullptr; s_fontMinus = nullptr; s_fontPlus = nullptr;
+    /* Widget pointers into the tree that just went with the layer. The row and
+     * link target lists are plain strings and harmless, but the form fields
+     * hold lv_obj_t* the submit path would write through. */
+    s_fields.clear();
+    s_linkTargets.clear();
+    s_lxmfTargets.clear();
+    s_rowTargets.clear();
 }
 
 /* NomadApp::appInit — the boot-task half of bring-up, run once by
