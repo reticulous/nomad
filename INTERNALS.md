@@ -36,12 +36,15 @@ empty → anonymous), so per-page `.allowed` ACLs and identity-scoped
 ## 2. The task
 
 One FreeRTOS task on **core 1, prio 1, 8 KB PSRAM stack** — the same class as
-lxmf. It waits on the boot barrier (`waitForFlag("rns.ready", 120)`; if rns is
-never ready it `killSelf`s — no rnsd, no point), then `waitForTime(0)` before
-first contact so rnsd's ITS server surface is up and the clock is valid, opens
-its aux server port, connects the announced-nodes subscription, and runs a
-single `itsPoll` loop with a 1 Hz publish tick that reconnects the
-announced-nodes subscription if it dropped.
+lxmf. It carries **no boot barrier of its own**: the task is registered with the
+RNS lifecycle orchestrator (`rnsServiceRegister`), and `rnsStart()` spawns it
+only once rnsd is up and past its boot window, so the clock is resolved and
+rnsd's ITS server surface is there by the time the body runs. It opens its aux
+server port, connects the announced-nodes subscription, and runs a single
+`itsPoll` loop with a 5 s housekeeping tick that reconnects the announced-nodes
+subscription if it dropped. On `rnsStop()` it drops every link, releases the
+subscription, and **parks** on its inbox rather than deleting itself, so its ITS
+slot, storage subscriptions and page cache survive a stop/start.
 
 ### Sessions
 
