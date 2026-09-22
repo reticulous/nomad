@@ -1102,11 +1102,11 @@ void buildPageShell() {
         storageSet("s.nomad.page_font", idx);
         rebuildPage();
     };
-    s_fontMinus = mkLabel(rightCluster, LV_SYMBOL_MINUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
+    s_fontMinus = mkLabel(rightCluster, LV_SYMBOL_MINUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, lcdPx(16)));
     lv_obj_add_flag(s_fontMinus, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(s_fontMinus, HDR_BTN_GAP / 2);
     lv_obj_add_event_cb(s_fontMinus, fontStep, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
-    s_fontPlus = mkLabel(rightCluster, LV_SYMBOL_PLUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, 16));
+    s_fontPlus = mkLabel(rightCluster, LV_SYMBOL_PLUS, lv_color_hex(0xc0c8d0), lcdFont(LcdFace::SYMBOLS, lcdPx(16)));
     lv_obj_add_flag(s_fontPlus, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(s_fontPlus, HDR_BTN_GAP / 2);
     lv_obj_add_event_cb(s_fontPlus, fontStep, LV_EVENT_CLICKED, (void*)(intptr_t)+1);
