@@ -24,5 +24,5 @@ Declared in `esp-idf/idf_component.yml` and `browser/package.json`:
 | Browser peer deps (Vue, Quasar, Pinia, vue-router) | npm | MIT |
 
 Nomad Network and its Micron markup are by Mark Qvist
-(`markqvist/NomadNet`, MIT). This implementation is independent; no
+(`markqvist/NomadNet`, GPL-3.0). This implementation is independent; no
 Nomad Network source code is incorporated from the upstream reference.
