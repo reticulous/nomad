@@ -237,11 +237,11 @@ struct Session {
  * "identify to this node" choices, not an address book. */
 #define NOMAD_IDENT_MAX  8
 
-/* LXMF identity slots scanned when resolving who to identify as. Higher than
- * the four LXMF allocates today: the slots are sparse (destroying id 0 leaves
- * id 1), a miss costs one storage read, and nomad must not carry a build
- * dependency on lxmf for a ceiling. */
-#define NOMAD_LXMF_SLOTS 8
+/* LXMF identity slots scanned when resolving who to identify as: all ten LXMF
+ * allocates. The slots are sparse (destroying id 0 leaves id 1), a miss costs
+ * one storage read, and nomad must not carry a build dependency on lxmf for a
+ * ceiling. */
+#define NOMAD_LXMF_SLOTS 10
 
 PSRAM_BSS static Session s_sess[NOMAD_SESSIONS] = {};  /* handles set to -1 in nomadTaskMain */
 
@@ -377,6 +377,11 @@ static std::string identKeyForSel(const std::string& sel)
 static bool identSlotLive(int n)
 {
     char k[48];
+    /* A group is not somebody to browse as. */
+    std::snprintf(k, sizeof k, "s.lxmf.id.%d.kind", n);
+    char kind[16] = {};
+    storageGetStr(k, kind, sizeof(kind), "");
+    if (!std::strcmp(kind, "group")) return false;
     std::snprintf(k, sizeof k, "lxmf.id.%d.dest_hash", n);
     char v[40] = {};
     storageGetStr(k, v, sizeof(v), "");

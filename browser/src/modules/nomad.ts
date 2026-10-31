@@ -269,11 +269,13 @@ export function useNomad(): UseNomad {
     for (const [slot, v] of Object.entries<any>(ids)) {
       const hash = String(v?.dest_hash ?? '')
       if (!/^[0-9a-f]{32}$/i.test(hash)) continue
+      /* A group holds a slot too, but nobody browses as a group. */
+      if (String(device.get(`s.lxmf.id.${slot}.kind`) ?? '') === 'group') continue
       const name = String(device.get(`s.lxmf.id.${slot}.display_name`) ?? '')
       out.push({ sel: `lxmf${slot}`, label: name || `LXMF identity ${slot}`,
                  hash, lxmf: true })
     }
-    out.sort((a, b) => a.sel.localeCompare(b.sel))
+    out.sort((a, b) => a.sel.localeCompare(b.sel, undefined, { numeric: true }))
     out.push({ sel: 'node', label: 'This node',
                hash: String(device.get('rnsd.identity_hash') ?? ''), lxmf: false })
     return out

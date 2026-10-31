@@ -401,10 +401,10 @@ void updateHdrButtons() {
  * identity is offered once its destination is up (lxmf.id.<n>.dest_hash),
  * which is also what the web UI lists. */
 
-/* Slots scanned. Higher than the four LXMF allocates today: they are sparse
- * (destroying id 0 leaves id 1), a miss is one storage read, and this file
- * must not depend on lxmf's private ceiling. */
-constexpr int kLxmfSlots = 8;
+/* Slots scanned: all ten LXMF allocates. They are sparse (destroying id 0
+ * leaves id 1), a miss is one storage read, and this file must not depend on
+ * lxmf for a ceiling. */
+constexpr int kLxmfSlots = 10;
 
 struct IdentOpt { std::string sel, label, hash; };
 std::vector<IdentOpt> s_idOpts;      /* the open chooser's rows, by index */
@@ -414,6 +414,8 @@ std::vector<IdentOpt> identityOptions() {
     std::vector<IdentOpt> out;
     for (int n = 0; n < kLxmfSlots; ++n) {
         char k[64];
+        snprintf(k, sizeof k, "s.lxmf.id.%d.kind", n);
+        if (storageGetStr(k, "") == "group") continue;   /* not somebody to browse as */
         snprintf(k, sizeof k, "lxmf.id.%d.dest_hash", n);
         std::string h = storageGetStr(k, "");
         if (!isHash(h)) continue;
