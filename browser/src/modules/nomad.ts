@@ -143,8 +143,9 @@ export interface UseNomad {
   /** Open an LXMF conversation for an lxmf@<hash> address tapped in a page
    *  (writes the shared `lxmf.url_web` var; LXMF reacts). */
   openLxmf: (hash: string) => void
-  /** Open an RRC hub, and optionally one of its rooms, for an rrc@ or rrc://
-   *  link tapped in a page (writes the shared `rrc.url_web` var). */
+  /** Open an RRC hub, and optionally one of its rooms, for an RRC link tapped
+   *  in a page or entered in the address bar (writes the shared `rrc.url_web`
+   *  var). */
   openRrc: (hub: string, room?: string) => void
 }
 
@@ -327,7 +328,7 @@ export function useNomad(): UseNomad {
     device.sendJson(nest('lxmf.url_web', `${h}:${Date.now()}`))
   }
 
-  /* An rrc@<hub> or rrc://<hub>/<room> link hands the hub, and the room when
+  /* An RRC link (parseRrcLink in lib/micron) hands the hub, and the room when
    * there is one, to the RRC app through its inbound link var. Decoupled the
    * same way as openLxmf: a build without RRC simply has nobody reading it. */
   const openRrc = (hub: string, room = '') => {

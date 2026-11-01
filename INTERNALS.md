@@ -296,10 +296,16 @@ From `Browser.py`. A target is `<url>` optionally followed by backtick-delimited
   resolvers ignore `@`-scheme and `://` targets so such links don't misfire,
   with two exceptions that hand the target to another app instead of browsing:
   `lxmf@<32hex>`, which both renderers turn into a tappable contact link for LXMF
-  (`lxmf.url_web` / `lxmf.url_lcd`), and `rrc@<32hex>` /
-  `rrc://<32hex>[:<dest>]/<room>`, which open the hub — and the room, its `#`
-  stripped and lowercased — in RRC (`rrc.url_web` / `rrc.url_lcd`, value
-  `<hub>[/<room>]|<nonce>`).
+  (`lxmf.url_web` / `lxmf.url_lcd`), and the RRC links `rrc@<32hex>`,
+  `rrc://<32hex>[:<dest>]/<room>`, `rrc://[#]<room>@<hub>` and bare
+  `#<room>@<hub>` (room `[A-Za-z0-9][A-Za-z0-9_.-]*`; hub 32 hex, or 64 cut to
+  its first 32), which open the hub — and the room, its `#` stripped and
+  lowercased — in RRC (`rrc.url_web` / `rrc.url_lcd`, value
+  `<hub>[/<room>]|<nonce>`). The web address bar takes the same RRC links. In
+  plain page text both renderers make an `rrc://…` link (not mid-token) and a
+  bare `#<room>@<hub>` (at line start or after whitespace, `(` or `,`) into a
+  link to that target, less trailing `.,;:!?)]}'"`; a `#` at the very start of
+  a source line is still a Micron comment.
 
 ### 7.5 Micron markup (the renderer contract)
 Backtick `` ` `` is the control char (`MicronParser.py` is the grammar of record

@@ -167,7 +167,7 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import FloatingWindow from 'spangap-browser/components/FloatingWindow.vue'
 import { useNomad, nomadOpenUrl, DEFAULT_PAGE, WEB_SESSIONS, type NavStatus, type NomadNode, type Bookmark } from '../modules/nomad'
-import { micronToHtml } from '../lib/micron'
+import { micronToHtml, parseRrcLink } from '../lib/micron'
 import { useWinZoom } from 'rns/lib/winZoom'
 
 const { scale, zoomIn, zoomOut } = useWinZoom('nomad')
@@ -501,8 +501,11 @@ function closeTab(id: number) {
 
 function goAddress() {
   // A hash pasted in space-separated groups reads as one, and a full-length
-  // (64-hex) hash as the leading 32 it truncates to.
+  // (64-hex) hash as the leading 32 it truncates to. An RRC link goes to the
+  // RRC app, as it does when tapped in a page.
   const raw = address.value.trim()
+  const rrc = parseRrcLink(raw)
+  if (rrc) { nomad.openRrc(rrc.hub, rrc.room); return }
   const c = raw.indexOf(':')
   let host = (c < 0 ? raw : raw.slice(0, c)).replace(/\s+/g, '')
   if (/^[0-9a-fA-F]{64}$/.test(host)) host = host.slice(0, 32)
@@ -562,10 +565,10 @@ function followTarget(target: string, newTabReq: boolean) {
   // instead of navigating to a page.
   const lx = /^lxmf@([0-9a-fA-F]{32})$/i.exec(url.trim())
   if (lx) { nomad.openLxmf(lx[1]!.toLowerCase()); return }
-  // rrc@<hub> and rrc://<hub>[:<dest>]/<room> open the hub (and the room) in
-  // the RRC app.
-  const rrc = /^(?:rrc@|rrc:\/\/)([0-9a-fA-F]{32})(?::[^/]*)?(?:\/#?([^/\s]+))?\/?$/i.exec(url.trim())
-  if (rrc) { nomad.openRrc(rrc[1]!.toLowerCase(), rrc[2] ?? ''); return }
+  // An RRC link (rrc@<hub>, rrc://<hub>[:<dest>]/<room>, rrc://#<room>@<hub>,
+  // #<room>@<hub>) opens the hub (and the room) in the RRC app.
+  const rrc = parseRrcLink(url)
+  if (rrc) { nomad.openRrc(rrc.hub, rrc.room); return }
   const r = resolveUrl(url)
   if (!r) return
 

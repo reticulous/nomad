@@ -42,6 +42,34 @@ export interface MicronLink {
   label: string
 }
 
+/** An RRC link: `rrc@<hub>`, `rrc://<hub>[:<dest>][/<room>]`,
+ *  `rrc://[#]<room>@<hub>` or bare `#<room>@<hub>`. A <hub> in the
+ *  room@hub forms is 32 hex, or 64 cut to its first 32. Returns the lowercase
+ *  hub and the room without its '#' ('' = none), or null if `s` is not one. */
+export function parseRrcLink(s: string): { hub: string; room: string } | null {
+  const u = s.trim()
+  const n = /^(?:rrc:\/\/#?|#)([A-Za-z0-9][A-Za-z0-9_.-]*)@([0-9a-f]{64}|[0-9a-f]{32})$/i.exec(u)
+  if (n) return { hub: n[2]!.slice(0, 32).toLowerCase(), room: n[1]! }
+  const o = /^(?:rrc@|rrc:\/\/)([0-9a-f]{32})(?::[^/]*)?(?:\/#?([^/\s]+))?\/?$/i.exec(u)
+  if (o) return { hub: o[1]!.toLowerCase(), room: o[2] ?? '' }
+  return null
+}
+
+/** Length of an RRC link starting at text[i] in plain page text, or 0:
+ *  `rrc://…` not mid-token, or bare `#<room>@<hub>` at the start or after
+ *  whitespace, '(' or ','. The candidate runs to whitespace, a backtick or a
+ *  backslash, less any trailing sentence punctuation, and must parse whole. */
+function rrcLinkAt(text: string, i: number): number {
+  const prev = i > 0 ? text[i - 1]! : ''
+  if (text[i] === '#') {
+    if (prev && !/[\s(,]/.test(prev)) return 0
+  } else if (text.slice(i, i + 6).toLowerCase() === 'rrc://') {
+    if (prev && /[0-9a-z@._-]/i.test(prev)) return 0
+  } else return 0
+  const tok = (/^[^\s`\\]+/.exec(text.slice(i))?.[0] ?? '').replace(/[.,;:!?)\]}'"]+$/, '')
+  return parseRrcLink(tok) ? tok.length : 0
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -127,6 +155,17 @@ function renderInline(text: string, st: Style, alignIn: string | null): { html: 
         if (st.bg) bgUsed = true
         out += escapeHtml(text[i + 1]!)
         i += 1
+        continue
+      }
+      // Bare RRC link → a plain link, followed like a `[…] target.
+      const rl = rrcLinkAt(text, i)
+      if (rl) {
+        const wasOpen = spanOpen
+        closeSpan()
+        const tok = escapeHtml(text.slice(i, i + rl))
+        out += `<a class="mlink" data-mtarget="${tok}" title="${tok}">${tok}</a>`
+        if (wasOpen && styleActive(st)) { out += `<span style="${styleCss(st)}">`; spanOpen = true }
+        i += rl - 1
         continue
       }
       // Bare lxmf@<32hex> → clickable contact link (not mid-token).

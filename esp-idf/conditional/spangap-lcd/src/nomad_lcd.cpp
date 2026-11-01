@@ -274,6 +274,80 @@ bool matchLxmfAt(const std::string& line, size_t pos, std::string& hash) {
     return true;
 }
 
+/* An RRC link: rrc@<hub>, rrc://<hub>[:<dest>][/<room>], rrc://[#]<room>@<hub>
+ * or bare #<room>@<hub>. A <hub> in the room@hub forms is 32 hex, or 64 cut
+ * to its first 32. Fills the lowercase hub and the lowercase room without its
+ * '#' (empty = none). */
+bool parseRrcLink(const std::string& u, std::string& hub, std::string& room) {
+    auto lower = [](char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; };
+    auto alnum = [](char c) { return (c>='0'&&c<='9')||(c>='a'&&c<='z')||(c>='A'&&c<='Z'); };
+    auto hasPfx = [&](const char* p) {
+        size_t n = strlen(p);
+        if (u.size() < n) return false;
+        for (size_t k = 0; k < n; k++) if (lower(u[k]) != p[k]) return false;
+        return true;
+    };
+    size_t pl = hasPfx("rrc://") ? 6 : hasPfx("rrc@") ? 4 : 0;
+
+    /* [rrc://][#]<room>@<hub> — the '#' is required without the scheme */
+    if (pl != 4) {
+        size_t s = pl;
+        if (s < u.size() && u[s] == '#') s++;
+        else if (!pl) s = std::string::npos;
+        size_t at = s == std::string::npos ? s : u.find('@', s);
+        if (at != std::string::npos && at > s && alnum(u[s])) {
+            bool ok = true;
+            for (size_t k = s; k < at && ok; k++)
+                ok = alnum(u[k]) || u[k] == '_' || u[k] == '.' || u[k] == '-';
+            size_t hl = u.size() - (at + 1);
+            if (ok && (hl == 32 || (hl == 64 && isHash(u.substr(at + 33, 32))))
+                   && isHash(u.substr(at + 1, 32))) {
+                hub = u.substr(at + 1, 32);
+                room = u.substr(s, at - s);
+                for (char& c : hub) c = lower(c);
+                for (char& c : room) c = lower(c);
+                return true;
+            }
+        }
+    }
+
+    /* rrc@<hub> / rrc://<hub>[:<dest>][/<room>] */
+    if (!pl || u.size() < pl + 32 || !isHash(u.substr(pl, 32))) return false;
+    if (u.size() > pl + 32 && u[pl + 32] != ':' && u[pl + 32] != '/') return false;
+    hub = u.substr(pl, 32);
+    room.clear();
+    size_t slash = u.find('/', pl + 32);
+    if (slash != std::string::npos) {
+        room = u.substr(slash + 1);
+        while (!room.empty() && room[0] == '#') room.erase(0, 1);
+        while (!room.empty() && room.back() == '/') room.pop_back();
+    }
+    for (char& c : hub) c = lower(c);
+    for (char& c : room) c = lower(c);
+    return true;
+}
+
+/* Length of an RRC link starting at line[pos] in plain page text, or 0:
+ * rrc://… not mid-token, or bare #<room>@<hub> at the start or after
+ * whitespace, '(' or ','. The candidate runs to whitespace, a backtick or a
+ * backslash, less any trailing sentence punctuation, and must parse whole. */
+size_t rrcLinkAt(const std::string& line, size_t pos) {
+    char prev = pos ? line[pos - 1] : 0;
+    if (line[pos] == '#') {
+        if (prev && prev != ' ' && prev != '\t' && prev != '(' && prev != ',') return 0;
+    } else if (line.compare(pos, 6, "rrc://") == 0 || line.compare(pos, 6, "RRC://") == 0) {
+        bool word = (prev>='0'&&prev<='9')||(prev>='a'&&prev<='z')||(prev>='A'&&prev<='Z')
+                 || prev == '@' || prev == '.' || prev == '_' || prev == '-';
+        if (word) return 0;
+    } else return 0;
+    size_t end = pos;
+    while (end < line.size() && line[end] != ' ' && line[end] != '\t'
+           && line[end] != '`' && line[end] != '\\') end++;
+    while (end > pos && strchr(".,;:!?)]}'\"", line[end - 1])) end--;
+    std::string hub, room;
+    return parseRrcLink(line.substr(pos, end - pos), hub, room) ? end - pos : 0;
+}
+
 /* The fields of a packed bookmark value, "<hash>[:<path>]|<name>|<ident>|
  * <note>": <ident> is the identify selector the site is browsed with ("" =
  * anonymously), and the note is last so it alone may contain '|'. */
@@ -605,20 +679,11 @@ void followTarget(const std::string& target) {
         return;
     }
 
-    /* rrc@<hub> and rrc://<hub>[:<dest>]/<room> open the hub (and the room)
-     * in the RRC app, through its inbound link var. */
+    /* An RRC link (parseRrcLink) opens the hub (and the room) in the RRC
+     * app, through its inbound link var. */
     {
-        size_t pl = url.rfind("rrc@", 0) == 0 ? 4 : url.rfind("rrc://", 0) == 0 ? 6 : 0;
-        if (pl && url.size() >= pl + 32 && isHash(url.substr(pl, 32))) {
-            std::string hub = url.substr(pl, 32), room;
-            size_t slash = url.find('/', pl + 32);
-            if (slash != std::string::npos) {
-                room = url.substr(slash + 1);
-                while (!room.empty() && (room[0] == '#')) room.erase(0, 1);
-                while (!room.empty() && room.back() == '/') room.pop_back();
-                for (char& c : room) c = (char)tolower((unsigned char)c);
-            }
-            for (char& c : hub) c = (char)tolower((unsigned char)c);
+        std::string hub, room;
+        if (parseRrcLink(url, hub, room)) {
             char nonce[16];
             snprintf(nonce, sizeof nonce, "|%u", (unsigned)lv_tick_get());
             storageSet("rrc.url_lcd", (hub + (room.empty() ? "" : "/" + room) + nonce).c_str());
@@ -697,6 +762,13 @@ std::vector<Seg> scanInline(const std::string& line, MStyle& st) {
             if (ch == '\\' && i + 1 < line.size()) {
                 cur += line[i + 1];
                 i++;
+                continue;
+            }
+            /* Bare RRC link → a plain link, followed like a `[…] target. */
+            if (size_t rl = rrcLinkAt(line, i)) {
+                flush();
+                segs.push_back({ SEG_LINK, line.substr(i, rl), line.substr(i, rl), "", "" });
+                i += rl - 1;
                 continue;
             }
             /* Bare lxmf@<32hex> → tappable contact link (not mid-token). */

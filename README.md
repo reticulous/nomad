@@ -241,8 +241,10 @@ there would be a layering violation.
 - It is a **client only** — there is no `nomadnetwork.node` server (page
   hosting) side here.
 - It does **not** render Micron — the frontends do.
-- No file download (`/file/…`) or in-page partials (`p:`). An `rrc@` or
-  `rrc://` chat link is handed to the [RRC](../rrc) app rather than browsed.
+- No file download (`/file/…`) or in-page partials (`p:`). An RRC chat link
+  (`rrc@<hub>`, `rrc://<hub>[/<room>]`, `rrc://#<room>@<hub>` or
+  `#<room>@<hub>`) — as a link target, in page text, or typed in the web
+  address bar — is handed to the [RRC](../rrc) app rather than browsed.
 
 ## Read next
 
