@@ -605,6 +605,27 @@ void followTarget(const std::string& target) {
         return;
     }
 
+    /* rrc@<hub> and rrc://<hub>[:<dest>]/<room> open the hub (and the room)
+     * in the RRC app, through its inbound link var. */
+    {
+        size_t pl = url.rfind("rrc@", 0) == 0 ? 4 : url.rfind("rrc://", 0) == 0 ? 6 : 0;
+        if (pl && url.size() >= pl + 32 && isHash(url.substr(pl, 32))) {
+            std::string hub = url.substr(pl, 32), room;
+            size_t slash = url.find('/', pl + 32);
+            if (slash != std::string::npos) {
+                room = url.substr(slash + 1);
+                while (!room.empty() && (room[0] == '#')) room.erase(0, 1);
+                while (!room.empty() && room.back() == '/') room.pop_back();
+                for (char& c : room) c = (char)tolower((unsigned char)c);
+            }
+            for (char& c : hub) c = (char)tolower((unsigned char)c);
+            char nonce[16];
+            snprintf(nonce, sizeof nonce, "|%u", (unsigned)lv_tick_get());
+            storageSet("rrc.url_lcd", (hub + (room.empty() ? "" : "/" + room) + nonce).c_str());
+            return;
+        }
+    }
+
     std::string hash, path;
     if (!resolveUrl(url, hash, path)) return;
 

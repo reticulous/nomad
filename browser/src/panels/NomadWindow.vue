@@ -556,6 +556,10 @@ function followTarget(target: string, newTabReq: boolean) {
   // instead of navigating to a page.
   const lx = /^lxmf@([0-9a-fA-F]{32})$/i.exec(url.trim())
   if (lx) { nomad.openLxmf(lx[1]!.toLowerCase()); return }
+  // rrc@<hub> and rrc://<hub>[:<dest>]/<room> open the hub (and the room) in
+  // the RRC app.
+  const rrc = /^(?:rrc@|rrc:\/\/)([0-9a-fA-F]{32})(?::[^/]*)?(?:\/#?([^/\s]+))?\/?$/i.exec(url.trim())
+  if (rrc) { nomad.openRrc(rrc[1]!.toLowerCase(), rrc[2] ?? ''); return }
   const r = resolveUrl(url)
   if (!r) return
 

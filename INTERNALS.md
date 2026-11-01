@@ -28,8 +28,8 @@ wire contract (§7). Relative to a desktop NomadNet browser it provides:
   task — it never parses Micron.
 
 What nomad deliberately does **not** do: host pages (the `nomadnetwork.node`
-server half), download files (`/file/…` Resources), in-page partials (`p:`), or
-`rrc://` chat rooms. It browses with the rnsd node identity (`identity_key` is
+server half), download files (`/file/…` Resources), or in-page partials (`p:`);
+`rrc://` chat rooms belong to the RRC app (§7.4). It browses with the rnsd node identity (`identity_key` is
 empty → anonymous), so per-page `.allowed` ACLs and identity-scoped
 `field_`/`var_` provenance are not exercised.
 
@@ -292,11 +292,14 @@ From `Browser.py`. A target is `<url>` optionally followed by backtick-delimited
   references → `field_<name>` form widgets, `*` = all fields.
 - `@`-prefixes select destination type: `nnn@` (default page), `lxmf@` (compose
   a message), `rrc@` (chat room).
-- `p:<id>` = in-page partial; `#anchor` = in-doc jump; `rrc://…` = chat. These
-  are out of scope — both resolvers ignore `@`-scheme and `://` targets so such
-  links don't misfire, **except** `lxmf@<32hex>`, which both renderers turn into
-  a tappable contact link that hands the dest hash to LXMF (`lxmf.url_lcd` on the
-  device).
+- `p:<id>` = in-page partial; `#anchor` = in-doc jump; `rrc://…` = chat. Both
+  resolvers ignore `@`-scheme and `://` targets so such links don't misfire,
+  with two exceptions that hand the target to another app instead of browsing:
+  `lxmf@<32hex>`, which both renderers turn into a tappable contact link for LXMF
+  (`lxmf.url_web` / `lxmf.url_lcd`), and `rrc@<32hex>` /
+  `rrc://<32hex>[:<dest>]/<room>`, which open the hub — and the room, its `#`
+  stripped and lowercased — in RRC (`rrc.url_web` / `rrc.url_lcd`, value
+  `<hub>[/<room>]|<nonce>`).
 
 ### 7.5 Micron markup (the renderer contract)
 Backtick `` ` `` is the control char (`MicronParser.py` is the grammar of record
