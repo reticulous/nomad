@@ -500,7 +500,13 @@ function closeTab(id: number) {
 }
 
 function goAddress() {
-  const u = address.value.trim()
+  // A hash pasted in space-separated groups reads as one, and a full-length
+  // (64-hex) hash as the leading 32 it truncates to.
+  const raw = address.value.trim()
+  const c = raw.indexOf(':')
+  let host = (c < 0 ? raw : raw.slice(0, c)).replace(/\s+/g, '')
+  if (/^[0-9a-fA-F]{64}$/.test(host)) host = host.slice(0, 32)
+  const u = c < 0 ? host : host + raw.slice(c)
   if (!u) return
   const colon = u.indexOf(':')
   if (colon === 32 && HASH_RE.test(u.slice(0, 32))) {

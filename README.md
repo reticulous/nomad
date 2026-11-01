@@ -74,7 +74,10 @@ the nomad-facing C API is [`nomad.h`](esp-idf/include/nomad.h).
 ## Storage variables — the API
 
 Frontends drive nomad entirely through the config tree. `dest_hex` is the
-16-byte destination hash as 32 hex chars.
+16-byte destination hash as 32 hex chars. Where a person types one — the
+address bar, `nomad.cmd.go`, the bookmark forms and commands — spaces in the
+hash are dropped and a full 64-hex hash is taken as its leading 32; a `:<path>`
+is kept as written.
 
 ### Settings (persistent, browser-synced — `s.nomad.*`)
 

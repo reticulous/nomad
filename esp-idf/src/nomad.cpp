@@ -116,6 +116,25 @@ static bool hexToDestHash(const std::string& s, uint8_t out[NOMAD_DEST_HASH_LEN]
     return true;
 }
 
+/* A typed "<hash>[:<path>]" as stored and used: the spaces of a grouped paste
+ * taken out of the hash half, a full-length hash cut to its leading 16 bytes,
+ * and no trailing space. */
+static std::string squeezeHost(const std::string& url)
+{
+    size_t colon = url.find(':');
+    std::string out;
+    for (size_t i = 0; i < url.size(); i++)
+        if (i > colon || !std::isspace((unsigned char)url[i])) out += url[i];
+    while (!out.empty() && std::isspace((unsigned char)out.back())) out.pop_back();
+    size_t host = out.find(':');
+    if (host == std::string::npos) host = out.size();
+    bool full = host == NOMAD_DEST_HASH_LEN * 4;
+    for (size_t i = 0; full && i < host; i++)
+        if (!std::isxdigit((unsigned char)out[i])) full = false;
+    if (full) out.erase(NOMAD_DEST_HASH_LEN * 2, NOMAD_DEST_HASH_LEN * 2);
+    return out;
+}
+
 /* Strip C0/DEL from network-supplied strings before logging (an embedded
  * ESC in an announce name otherwise hoses the browser log window). */
 static std::string sanitizeForLog(std::string_view s)
@@ -682,6 +701,7 @@ static void onCmdGo(const char* key, const char* val)
     std::string cmd = val;
     storageUnset(key);
     int sid = parseSid(cmd);
+    cmd = squeezeHost(cmd);
 
     std::string hash = cmd, path = NOMAD_DEFAULT_PAGE;
     size_t colon = cmd.find(':');
@@ -1135,7 +1155,7 @@ static void onBmAdd(const char* key, const char* val)
         cJSON* m = o ? cJSON_GetObjectItem(o, f) : nullptr;
         return std::string(cJSON_IsString(m) ? m->valuestring : "");
     };
-    std::string url = str("url"), name = str("name"), note = str("note");
+    std::string url = squeezeHost(str("url")), name = str("name"), note = str("note");
     if (o) cJSON_Delete(o);
     std::string why = bmRejection(url);
     if (!why.empty()) { bmError(why.c_str()); return; }
@@ -1158,7 +1178,7 @@ static void onBmSet(const char* key, const char* val)
         cJSON* m = o ? cJSON_GetObjectItem(o, f) : nullptr;
         return std::string(cJSON_IsString(m) ? m->valuestring : "");
     };
-    std::string id = str("_id"), url = str("url"), name = str("name"), note = str("note");
+    std::string id = str("_id"), url = squeezeHost(str("url")), name = str("name"), note = str("note");
     if (o) cJSON_Delete(o);
     char k[64];
     std::snprintf(k, sizeof k, "s.nomad.bookmarks.%s", id.c_str());
@@ -1194,6 +1214,7 @@ static void onCmdBookmarkAdd(const char* key, const char* val)
     /* "<hash>[:<path>]|<name>|<ident>|<note>" — note may contain '|' (last). */
     BmVal b;
     if (!bmParse(cmd, b)) { warn("bookmark add: need <hash>[:<path>]|<name>|<ident>[|<note>]"); return; }
+    b.url = squeezeHost(b.url);
     std::string hash = bmHostOf(b.url);
     uint8_t dh[NOMAD_DEST_HASH_LEN];
     if (!hexToDestHash(hash, dh)) { warn("bookmark add: bad hash"); return; }
@@ -1231,10 +1252,8 @@ static void onCmdBookmarkAdd(const char* key, const char* val)
 static void onCmdBookmarkDel(const char* key, const char* val)
 {
     if (!val || !*val) return;
-    std::string v = val;
+    std::string v = squeezeHost(val);
     storageUnset(key);
-    while (!v.empty() && v.back()  == ' ') v.pop_back();
-    while (!v.empty() && v.front() == ' ') v.erase(0, 1);
     if (v.size() >= 32) {                          /* url form */
         if (v.find(':') == std::string::npos) v += ":" NOMAD_DEFAULT_PAGE;
         std::string id = bookmarkIdForUrl(v);
@@ -1465,11 +1484,51 @@ static void cliNomad(const char* args)
              * The CLI names no identity: a bookmark added here inherits the
              * one the site's other bookmarks carry, and otherwise browses
              * anonymously until the ID button says otherwise. */
-            std::string r = rest;
-            size_t sp = r.find(' ');
-            if (sp == std::string::npos) { cliPrintf("usage: nomad bookmark add <hash> <name>[ <note>]\n"); return; }
-            std::string hash = r.substr(0, sp);
-            std::string tail = r.substr(sp + 1);
+            /* The hash may arrive in space-separated groups: hex words are
+             * joined until 32 characters, or one carrying the ":<path>", and
+             * on to 64 when they make exactly a full-length hash, which is
+             * cut to its leading 32. */
+            auto word = [](const char*& s, std::string& t, bool& hex, bool& path) {
+                while (*s == ' ') s++;
+                const char* e = s;
+                while (*e && *e != ' ') e++;
+                t.assign(s, e - s);
+                size_t c = t.find(':');
+                path = c != std::string::npos;
+                hex = !t.empty();
+                for (size_t i = 0; i < t.size() && i < c; i++)
+                    if (!std::isxdigit((unsigned char)t[i])) hex = false;
+                s = e;
+            };
+            auto hostLen = [](const std::string& h) {
+                size_t c = h.find(':');
+                return c == std::string::npos ? h.size() : c;
+            };
+            std::string hash, t;
+            bool hex, path = false;
+            for (;;) {
+                const char* s = rest;
+                word(s, t, hex, path);
+                if (t.empty() || (!hex && !hash.empty())) { path = false; break; }
+                hash += t;
+                rest = s;
+                if (!hex || path || hash.size() >= 32) break;
+            }
+            if (hex && !path && hash.size() >= 32 && hash.size() < 64) {
+                std::string more = hash;
+                const char* s = rest;
+                while (hostLen(more) < 64) {
+                    word(s, t, hex, path);
+                    if (t.empty() || !hex) break;
+                    more += t;
+                    if (path) break;
+                }
+                if (hostLen(more) == 64) { hash = more; rest = s; }
+            }
+            hash = squeezeHost(hash);
+            while (*rest == ' ') rest++;
+            if (hash.empty() || !*rest) { cliPrintf("usage: nomad bookmark add <hash> <name>[ <note>]\n"); return; }
+            std::string tail = rest;
             std::string name = tail, note;
             size_t sp2 = tail.find(' ');
             if (sp2 != std::string::npos) { name = tail.substr(0, sp2); note = tail.substr(sp2 + 1); }
